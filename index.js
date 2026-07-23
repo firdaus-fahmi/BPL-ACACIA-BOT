@@ -10,7 +10,10 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const retry = require('async-retry');
-const PQueue = require('p-queue'); // Menggunakan PQueue CommonJS (v6.6.2)
+
+// Fix Universal Import untuk p-queue (Mendukung CommonJS & ESM)
+const PQueueModule = require('p-queue');
+const PQueue = PQueueModule.default || PQueueModule;
 
 // =========================================================================
 // 1. VALIDASI ENVIRONMENT VARIABLES
@@ -432,7 +435,7 @@ async function initAndStart() {
                         const result = await model.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
                         const rawGeminiText = result.response.text();
                         
-                        // DI SINI BARIS YANG SEBELUMNYA ERROR (SUDAH DIPERBAIKI AMAN):
+                        // String replacement aman dari RegEx SyntaxError
                         const cleanJsonText = rawGeminiText.replace(/```json/gi, '').replace(/```/g, '').trim();
                         const jsonMatch = cleanJsonText.match(/\{[\s\S]*\}/);
 
