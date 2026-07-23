@@ -89,7 +89,7 @@ cron.schedule('0 2 * * *', performDatabaseBackup);
 // =========================================================================
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({
-    model: process.env.GEMINI_MODEL || "gemini-2.5-flash"
+    model: process.env.GEMINI_MODEL || "gemini-1.5-flash"
 });
 
 // MEMBACA CREDENTIALS.JSON SESUAI LOCATION DIRECTORY SCRIPT
@@ -134,7 +134,7 @@ function normalizeHouseNumber(raw) {
 
 function validateOCRData(data, rawText) {
     if (!data || !data.no_rumah || !data.nominal) {
-        return { valid: false, reason: "Data tidak lengkap" };
+        return { valid: false, reason: "Data nomor rumah atau nominal tidak terdeteksi" };
     }
 
     const normHouse = normalizeHouseNumber(data.no_rumah);
@@ -144,7 +144,7 @@ function validateOCRData(data, rawText) {
     }
 
     const upperRaw = rawText.toUpperCase();
-    const keywords = ["TRANSFER", "BERHASIL", "SUKSES", "BCA", "MANDIRI", "BRI", "BNI", "SELESAI", "TOTAL", "PAYMENT"];
+    const keywords = ["TRANSFER", "BERHASIL", "SUKSES", "BCA", "MANDIRI", "BRI", "BNI", "SELESAI", "TOTAL", "PAYMENT", "VA", "AKUN"];
     const hasKeyword = keywords.some(kw => upperRaw.includes(kw));
 
     if (!hasKeyword) {
@@ -413,13 +413,10 @@ async function initAndStart() {
 
             if (remoteJid === 'status@broadcast') return;
 
-            const isCommand = msgText.startsWith('!') || msgText.startsWith('.');
-            if (msg.key.fromMe && !isCommand) return;
-
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
-            // A. OCR ENGINE
+            // A. OCR ENGINE (Kirim / Unggah Gambar)
             // -----------------------------------------------------------------
             const isImage = msg.message.imageMessage || msg.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
 
@@ -431,6 +428,9 @@ async function initAndStart() {
                     return;
                 }
                 db.prepare("INSERT OR REPLACE INTO user_cooldowns (sender_id, last_upload) VALUES (?, ?)").run(senderJid, now);
+
+                // Kirim konfirmasi penerimaan awal ke pengirim
+                await sock.sendMessage(remoteJid, { text: "🔎 *Bukti transfer diterima!* Sedang diverifikasi oleh AI..." }, { quoted: msg });
 
                 ocrQueueInstance.add(async () => {
                     try {
@@ -444,179 +444,10 @@ async function initAndStart() {
                         }
 
                         const mimeType = msg.message.imageMessage?.mimetype || 'image/jpeg';
-                        const prompt = `Ekstrak data dari struk ini. Balas HANYA JSON valid: {"no_rumah": "CA 03-02", "nominal": 210000}. Jika tidak ada set null.`;
+                        const prompt = `Ekstrak data dari struk ini. Balas HANYA JSON valid tanpa teks lain: {"no_rumah": "CA 09-03", "nominal": 210000}. Jika tidak ada set null.`;
 
                         const result = await model.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
                         const rawGeminiText = result.response.text();
-                        const jsonMatch = rawGeminiText.match(/\{[\s\S]*\}/);
-
-                        if (!jsonMatch) throw new Error("JSON tidak ditemukan pada respon AI");
-                        const data = JSON.parse(jsonMatch[0]);
-
-                        const ocrVal = validateOCRData(data, rawGeminiText);
-                        if (!ocrVal.valid) {
-                            await sock.sendMessage(remoteJid, { text: `⚠️ Foto tidak memenuhi syarat konfirmasi otomatis (${ocrVal.reason}). Kirimkan foto yang lebih jelas.` }, { quoted: msg });
-                            return;
-                        }
-
-                        const targetNorm = ocrVal.normalizedHouse;
-
-                        if (activeHouseLocks.has(targetNorm)) {
-                            await sock.sendMessage(remoteJid, { text: `⏳ Pembayaran untuk rumah ${targetNorm} sedang diproses. Mohon tunggu sebentar.` }, { quoted: msg });
-                            return;
-                        }
-
-                        activeHouseLocks.add(targetNorm);
-
-                        try {
-                            if (data.nominal < 10000 || data.nominal > 10000000) {
-                                await sock.sendMessage(remoteJid, { text: `⚠️ Nominal Rp ${data.nominal.toLocaleString('id-ID')} terdeteksi di luar batas wajar. Hubungi Bendahara.` }, { quoted: msg });
-                                return;
-                            }
-
-                            const updateRes = await processPaymentAndLog(targetNorm, data.nominal, senderNumber, imageHash, rawGeminiText);
-
-                            if (updateRes.success) {
-                                db.prepare("INSERT INTO processed_hashes (hash) VALUES (?)").run(imageHash);
-                                let replyText = `✅ *PEMBAYARAN IPL TERKONFIRMASI*\n\n• No. Rumah: *${targetNorm}*\n• Nominal Masuk: *Rp ${data.nominal.toLocaleString('id-ID')}*\n• Status Tagihan: *${updateRes.status}*`;
-                                await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: `❌ Nomor rumah *${targetNorm}* tidak ditemukan di data Google Sheets!` }, { quoted: msg });
-                            }
-                        } finally {
-                            activeHouseLocks.delete(targetNorm);
-                        }
-
-                    } catch (err) {
-                        writeLog(`❌ OCR Processing Error: ${err.message}`);
-                    }
-                });
-            }
-
-            // -----------------------------------------------------------------
-            // B. COMMAND HANDLERS
-            // -----------------------------------------------------------------
-            const isAdmin = ADMIN_NUMBERS.includes(senderNumber);
-
-            if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
-                let replyText = await getRekeningInfoFromSheets();
-
-                if (!replyText) {
-                    replyText = 
-`🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
-
-Silakan melakukan pembayaran melalui salah satu metode berikut:
-
-*1️⃣ Transfer Bank*
-
-🏦 Bank : Mandiri
-👤 A/N : GALUH SUGIYANTI
-💳 No. Rekening :
-1840006586760
-
-━━━━━━━━━━━━━━━━━━━━━━
-
-*2️⃣ Virtual Account (VA)*
-
-Bank Mandiri Virtual Account
-
-Format VA:
-85485 + Nomor Rumah + 0
-
-Contoh:
-• Rumah A01 → 85485A010
-• Rumah B12 → 85485B120
-• Rumah C105 → 85485C1050
-
-━━━━━━━━━━━━━━━━━━━━━━
-
-📌 Setelah melakukan pembayaran, mohon kirim bukti transfer dengan mengetik:
-
-*.konfirmasi*
-
-atau kirim foto bukti transfer ke bot.
-
-Terima kasih 🙏`;
-                }
-
-                await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
-            } 
-            else if (cleanCmd === 'tunggakan' || cleanCmd === 'cek') {
-                try {
-                    writeLog(`🔍 Memproses command !tunggakan dari ${senderNumber}`);
-                    const penunggak = await getPenunggakFromSheets();
-                    
-                    if (!penunggak || penunggak.length === 0) {
-                        await sock.sendMessage(remoteJid, { text: "🎉 *LUNAS SEMUA!* Semua warga telah melunasi IPL." }, { quoted: msg });
-                    } else {
-                        // Header disesuaikan: BELUM BAYAR (di-bold)
-                        let teks = `📊 *DAFTAR *BELUM BAYAR* IPL (${penunggak.length} Rumah)*\n\n`;
                         
-                        // Menampilkan SEMUA daftar warga tanpa disembunyikan
-                        penunggak.forEach((w, i) => {
-                            const namaWarga = w.nama || "Warga";
-                            const noRumah = w.no_rumah || "-";
-                            const nominalFormatted = typeof w.total_tunggakan === 'number' 
-                                ? w.total_tunggakan.toLocaleString('id-ID') 
-                                : "0";
-
-                            teks += `${i + 1}. *${noRumah}* (${namaWarga}) - Rp ${nominalFormatted}\n`;
-                        });
-
-                        await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
-                    }
-                } catch (err) {
-                    writeLog(`❌ ERROR COMMAND TUNGGAKAN: ${err.stack || err.message}`);
-                    await sock.sendMessage(remoteJid, { 
-                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan file *credentials.json* ada di folder bot dan tab nama sheet *'${WARGA_SHEET}'* sudah sesuai.` 
-                    }, { quoted: msg });
-                }
-            }
-            else if (cleanCmd === 'konfirmasi') {
-                await sock.sendMessage(remoteJid, { text: "📸 Silakan *kirimkan foto/gambar bukti transfer* ke chat ini. Bot akan secara otomatis membaca dan memproses konfirmasi pembayaran Anda." }, { quoted: msg });
-            }
-            else if (cleanCmd === 'status') {
-                if (!isAdmin) return;
-                await sock.sendMessage(remoteJid, { text: `🤖 *SYSTEM STATUS*\n• Connected: ${isConnectedToWA}\n• Queue Size: ${ocrQueueInstance.size}\n• Active Locks: ${activeHouseLocks.size}` }, { quoted: msg });
-            }
-            else if (cleanCmd === 'menu' || cleanCmd === 'help') {
-                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah yang tersedia:\n• *.bayar* / *.rekening* : Informasi nomor rekening & VA\n• *.cek* / *.tunggakan* : Cek daftar tagihan warga\n• *.konfirmasi* : Panduan konfirmasi pembayaran\n• *Kirim Foto Struk* : Konfirmasi otomatis via AI` }, { quoted: msg });
-            }
-        });
-
-    } catch (err) {
-        writeLog(`❌ Fatal Error di initAndStart: ${err.message}`);
-        isReconnecting = false;
-    }
-}
-
-// -------------------------------------------------------------------------
-// C. GRACEFUL SHUTDOWN HANDLER
-// -------------------------------------------------------------------------
-const handleShutdown = async (signal) => {
-    writeLog(`⚠️ Signal ${signal} diterima. Memulai Graceful Shutdown...`);
-    
-    if (ocrQueueInstance) {
-        ocrQueueInstance.clear();
-    }
-
-    if (sock) {
-        try { sock.end(undefined); } catch (e) {}
-    }
-
-    try {
-        db.pragma('wal_checkpoint(TRUNCATE)');
-        db.close();
-        writeLog("✅ SQLite Database closed cleanly.");
-    } catch (e) {
-        writeLog(`❌ Error closing DB: ${e.message}`);
-    }
-
-    process.exit(0);
-};
-
-process.on('SIGTERM', () => handleShutdown('SIGTERM'));
-process.on('SIGINT', () => handleShutdown('SIGINT'));
-
-// Jalankan bot
-initAndStart();
+                        // Bersihkan tag markdown ```json ... ``` dari respon Gemini jika ada
+                        const cleanJsonText = rawGeminiText.replace(/```json|
