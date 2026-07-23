@@ -89,7 +89,8 @@ cron.schedule('0 2 * * *', performDatabaseBackup);
 // 3. GOOGLE API & RETRY MECHANISM
 // =========================================================================
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const geminiModelName = process.env.GEMINI_MODEL || "gemini-1.5-flash-latest";
+// Memakai nama model gemini-1.5-flash (tanpa -latest) agar kompatibel
+const geminiModelName = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 const model = genAI.getGenerativeModel({ model: geminiModelName });
 
 const credentialsPath = path.join(__dirname, 'credentials.json');
@@ -434,8 +435,7 @@ async function initAndStart() {
 
                         const result = await model.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
                         const rawGeminiText = result.response.text();
-                        
-                        // String replacement aman dari RegEx SyntaxError
+
                         const cleanJsonText = rawGeminiText.replace(/```json/gi, '').replace(/```/g, '').trim();
                         const jsonMatch = cleanJsonText.match(/\{[\s\S]*\}/);
 
