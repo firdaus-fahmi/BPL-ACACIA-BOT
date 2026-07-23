@@ -403,7 +403,7 @@ async function initAndStart() {
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
-            // A. OCR ENGINE (Membaca Gambar Bukti Transfer + Fallback Rate Limit)
+            // A. OCR ENGINE (Membaca Gambar Bukti Transfer + Retry Fallback)
             // -----------------------------------------------------------------
             const isImage = msg.message.imageMessage || msg.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
 
@@ -432,15 +432,21 @@ async function initAndStart() {
                         const mimeType = msg.message.imageMessage?.mimetype || 'image/jpeg';
                         const prompt = `Ekstrak data dari struk ini. Balas HANYA JSON valid tanpa teks lain: {"no_rumah": "CA 09-03", "nominal": 210000}. Jika tidak ada set null.`;
 
-                        // Panggilan AI dengan Penanganan Otomatis Fallback Rate Limit (429)
+                        // Panggilan AI dengan Retry & Model Fallback Terbaru
                         let result;
                         try {
                             result = await model.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
                         } catch (apiErr) {
-                            if (apiErr.message && apiErr.message.includes('429')) {
-                                writeLog('⚠️ Rate limit 429 tercapai, otomatis berpindah ke model fallback gemini-1.5-flash-8b...');
-                                const fallbackModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash-8b" });
-                                result = await fallbackModel.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
+                            if (apiErr.message && (apiErr.message.includes('429') || apiErr.message.includes('Quota'))) {
+                                writeLog('⚠️ Kena Limit 429. Menunggu 3 detik lalu berpindah ke model fallback gemini-2.0-flash-lite...');
+                                await delay(3000); // Tunggu 3 detik agar rate limit reset
+                                
+                                try {
+                                    const fallbackModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
+                                    result = await fallbackModel.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
+                                } catch (fallbackErr) {
+                                    throw new Error("Sistem AI sedang padat (Quota Exceeded). Silakan coba kirim ulang gambar 1 menit lagi.");
+                                }
                             } else {
                                 throw apiErr;
                             }
