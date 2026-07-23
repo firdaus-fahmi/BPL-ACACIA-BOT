@@ -28,7 +28,7 @@ const BOT_NUMBER = process.env.BOT_NUMBER;
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().replace(/[^0-9]/g, ''));
 
 // Variabel Nama Sheet Dinamis (Dapat diubah via .env)
-const WARGA_SHEET = process.env.WARGA_SHEET || '2026 ALL';
+const WARGA_SHEET = process.env.WARGA_SHEET || 'TAGIHAN 2RT 19072026';
 const SETTING_SHEET = process.env.SETTING_SHEET || 'Setting';
 const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
 
@@ -209,9 +209,10 @@ Terima kasih 🙏`;
 
 async function getPenunggakFromSheets() {
     return await fetchSheetsWithRetry(async () => {
+        // Range A5:Z1000 untuk mulai membaca dari data baris ke-5
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!A2:Z1000`,
+            range: `'${WARGA_SHEET}'!A5:Z1000`,
         });
 
         const rows = res.data.values || [];
@@ -220,14 +221,14 @@ async function getPenunggakFromSheets() {
             .map(row => {
                 if (!row || row.length === 0) return null;
 
-                // Index Kolom:
-                // row[2] = Kolom C (Nomor Rumah)
-                // row[3] = Kolom D (Nama Pemilik / Warga)
-                // row[4] / row[5] = Nominal Tunggakan
+                // INDEKS KOLOM SESUAI SPREADSHEET:
+                // row[2] = Kolom C (No Rumah)
+                // row[3] = Kolom D (Nama Pemilik)
+                // row[9] = Kolom J (Total Belum Bayar dalam Rp)
                 const noRumahVal = row[2] ? row[2].toString().trim() : "";
                 const namaVal = row[3] ? row[3].toString().trim() : "Warga";
                 
-                const rawNominal = row[5] || row[4] || "0";
+                const rawNominal = row[9] || "0";
                 const cleanNominalStr = rawNominal.toString().replace(/[^0-9]/g, '');
                 const parsedNominal = parseInt(cleanNominalStr, 10);
                 const totalNominal = isNaN(parsedNominal) ? 0 : parsedNominal;
@@ -248,7 +249,7 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!A2:Z1000`,
+            range: `'${WARGA_SHEET}'!A5:Z1000`,
         });
 
         const rows = res.data.values || [];
@@ -259,8 +260,8 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
         for (let i = 0; i < rows.length; i++) {
             const currentHouse = rows[i][2] ? normalizeHouseNumber(rows[i][2]) : "";
             if (currentHouse === targetNorm) {
-                rowIndex = i + 2;
-                const rawVal = rows[i][5] || rows[i][4] || "0";
+                rowIndex = i + 5; // Baris riil di Sheets = index + 5
+                const rawVal = rows[i][9] || "0";
                 currentSisaTagihan = parseInt(rawVal.toString().replace(/[^0-9]/g, ''), 10) || 0;
                 break;
             }
@@ -276,11 +277,12 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
             newStatus = `SEBAGIAN (Sisa Rp ${newSisa.toLocaleString('id-ID')})`;
         }
 
+        // Update Kolom J (Baris rowIndex)
         await sheets.spreadsheets.values.update({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!E${rowIndex}:F${rowIndex}`,
+            range: `'${WARGA_SHEET}'!J${rowIndex}`,
             valueInputOption: 'USER_ENTERED',
-            resource: { values: [[newStatus, newSisa]] },
+            resource: { values: [[newSisa]] },
         });
 
         const dateStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
