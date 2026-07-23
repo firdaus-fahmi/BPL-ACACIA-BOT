@@ -91,8 +91,12 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({
     model: process.env.GEMINI_MODEL || "gemini-2.5-flash"
 });
+
+// MEMBACA CREDENTIALS.JSON SESUAI LOCATION DIRECTORY SCRIPT (FIX ENOENT)
+const credentialsPath = path.join(__dirname, 'credentials.json');
+
 const auth = new google.auth.GoogleAuth({
-    keyFile: 'credentials.json',
+    keyFile: credentialsPath,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 const sheets = google.sheets({ version: 'v4', auth });
@@ -107,7 +111,7 @@ async function fetchSheetsWithRetry(fn) {
                 bail(err);
                 return;
             }
-            writeLog(`⚠️ Google API Error (${status || err.message}). Retrying...`);
+            writeLog(`⚠️ Google API Error (${err.message}). Retrying...`);
             throw err;
         }
     }, {
@@ -549,7 +553,7 @@ Terima kasih 🙏`;
                 } catch (err) {
                     writeLog(`❌ ERROR COMMAND TUNGGAKAN: ${err.stack || err.message}`);
                     await sock.sendMessage(remoteJid, { 
-                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan tab nama sheet *'${WARGA_SHEET}'* telah dikonfigurasi dengan benar di Google Sheets.` 
+                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan file *credentials.json* ada di folder bot dan tab nama sheet *'${WARGA_SHEET}'* sudah sesuai.` 
                     }, { quoted: msg });
                 }
             }
