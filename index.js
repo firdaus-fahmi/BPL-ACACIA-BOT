@@ -87,8 +87,8 @@ cron.schedule('0 2 * * *', performDatabaseBackup);
 // 3. GOOGLE API & RETRY MECHANISM LENGKAP (Poin 3)
 // =========================================================================
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
+const model = genAI.getGenerativeModel({
+    model: process.env.GEMINI_MODEL || "gemini-2.5-flash"});
 const auth = new google.auth.GoogleAuth({
     keyFile: 'credentials.json',
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
