@@ -209,7 +209,7 @@ Terima kasih 🙏`;
 
 async function getPenunggakFromSheets() {
     return await fetchSheetsWithRetry(async () => {
-        // Range A5:Z1000 untuk mulai membaca dari data baris ke-5
+        // Range A5:Z1000 untuk membaca data mulai baris ke-5
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
             range: `'${WARGA_SHEET}'!A5:Z1000`,
@@ -224,7 +224,7 @@ async function getPenunggakFromSheets() {
                 // INDEKS KOLOM SESUAI SPREADSHEET:
                 // row[2] = Kolom C (No Rumah)
                 // row[3] = Kolom D (Nama Pemilik)
-                // row[9] = Kolom J (Total Belum Bayar dalam Rp)
+                // row[9] = Kolom J (Total Belum Bayar)
                 const noRumahVal = row[2] ? row[2].toString().trim() : "";
                 const namaVal = row[3] ? row[3].toString().trim() : "Warga";
                 
@@ -277,7 +277,7 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
             newStatus = `SEBAGIAN (Sisa Rp ${newSisa.toLocaleString('id-ID')})`;
         }
 
-        // Update Kolom J (Baris rowIndex)
+        // Update Sisa Tagihan di Kolom J
         await sheets.spreadsheets.values.update({
             spreadsheetId: SPREADSHEET_ID,
             range: `'${WARGA_SHEET}'!J${rowIndex}`,
@@ -549,9 +549,11 @@ Terima kasih 🙏`;
                     if (!penunggak || penunggak.length === 0) {
                         await sock.sendMessage(remoteJid, { text: "🎉 *LUNAS SEMUA!* Semua warga telah melunasi IPL." }, { quoted: msg });
                     } else {
-                        let teks = `📊 *DAFTAR UNPAID IPL (${penunggak.length} Rumah)*\n\n`;
+                        // Header disesuaikan: BELUM BAYAR (di-bold)
+                        let teks = `📊 *DAFTAR *BELUM BAYAR* IPL (${penunggak.length} Rumah)*\n\n`;
                         
-                        penunggak.slice(0, 30).forEach((w, i) => {
+                        // Menampilkan SEMUA daftar warga tanpa disembunyikan
+                        penunggak.forEach((w, i) => {
                             const namaWarga = w.nama || "Warga";
                             const noRumah = w.no_rumah || "-";
                             const nominalFormatted = typeof w.total_tunggakan === 'number' 
@@ -560,10 +562,6 @@ Terima kasih 🙏`;
 
                             teks += `${i + 1}. *${noRumah}* (${namaWarga}) - Rp ${nominalFormatted}\n`;
                         });
-
-                        if (penunggak.length > 30) {
-                            teks += `\n_...dan ${penunggak.length - 30} rumah lainnya._`;
-                        }
 
                         await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
                     }
