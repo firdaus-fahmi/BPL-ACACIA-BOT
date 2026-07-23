@@ -27,7 +27,6 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const BOT_NUMBER = process.env.BOT_NUMBER;
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().replace(/[^0-9]/g, ''));
 
-// Status global untuk monitoring health check
 let isConnectedToWA = false;
 let ocrQueueInstance = null;
 
@@ -48,7 +47,6 @@ function writeLog(message) {
     fs.appendFileSync(path.join(logDir, `bot-${today}.log`), logLine, { encoding: 'utf8' });
 }
 
-// SQLite + Optimasi WAL Mode
 const db = new Database(path.join(__dirname, 'bot_data.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
@@ -64,13 +62,11 @@ db.exec(`
     );
 `);
 
-// Clean-up Memory/DB otomatis
 cron.schedule('0 3 * * *', () => {
     db.prepare("DELETE FROM processed_hashes WHERE processed_at < datetime('now', '-30 days')").run();
     writeLog("🧹 Housekeeping: Cleaned old hash entries from SQLite.");
 });
 
-// Backup SQLite Aman dengan WAL Checkpoint
 function performDatabaseBackup() {
     try {
         db.pragma('wal_checkpoint(TRUNCATE)');
@@ -84,7 +80,7 @@ function performDatabaseBackup() {
 cron.schedule('0 2 * * *', performDatabaseBackup);
 
 // =========================================================================
-// 3. GOOGLE API & RETRY MECHANISM LENGKAP
+// 3. GOOGLE API & RETRY MECHANISM
 // =========================================================================
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({
@@ -117,7 +113,7 @@ async function fetchSheetsWithRetry(fn) {
 }
 
 // =========================================================================
-// 4. HELPER LOGIKA BISNIS & VALIDASI OCR BERBASIS ATURAN
+// 4. HELPER LOGIKA BISNIS & GOOGLE SHEETS
 // =========================================================================
 function normalizeHouseNumber(raw) {
     if (!raw) return "";
@@ -147,6 +143,56 @@ function validateOCRData(data, rawText) {
     }
 
     return { valid: true, normalizedHouse: normHouse };
+}
+
+async function getRekeningInfoFromSheets() {
+    try {
+        const res = await sheets.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: "'Setting'!A2:B10",
+        });
+        const rows = res.data.values || [];
+        if (rows.length === 0) return null;
+
+        const config = {};
+        rows.forEach(r => { if (r[0] && r[1]) config[r[0].trim()] = r[1].trim(); });
+        
+        if (!config.BANK || !config.ACCOUNT_NUMBER) return null;
+
+        return `🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
+
+Silakan melakukan pembayaran melalui salah satu metode berikut:
+
+*1️⃣ Transfer Bank*
+
+🏦 Bank : ${config.BANK}
+👤 A/N : ${config.ACCOUNT_NAME || 'Pengurus RT'}
+💳 No. Rekening :
+${config.ACCOUNT_NUMBER}
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+*2️⃣ Virtual Account (VA)*
+
+Format VA:
+${config.VA_PREFIX || '85485'} + Nomor Rumah + 0
+
+Contoh:
+• Rumah A01 → ${config.VA_PREFIX || '85485'}A010
+• Rumah B12 → ${config.VA_PREFIX || '85485'}B120
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+📌 Setelah melakukan pembayaran, mohon kirim bukti transfer dengan mengetik:
+
+*.konfirmasi*
+
+atau langsung kirim foto bukti transfer ke bot.
+
+Terima kasih 🙏`;
+    } catch (err) {
+        return null; // Fallback jika sheet 'Setting' belum dibuat
+    }
 }
 
 async function getPenunggakFromSheets() {
@@ -220,12 +266,10 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
 }
 
 // =========================================================================
-// 5. SERVER EXPRESS & HEALTH CHECK MONITORING
+// 5. SERVER EXPRESS
 // =========================================================================
 const app = express();
-
 app.get('/', (req, res) => res.send('🤖 Bot WhatsApp Cluster Acacia Active!'));
-
 app.get('/health', (req, res) => {
     res.json({
         status: "ok",
@@ -235,13 +279,11 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString()
     });
 });
-
 app.listen(process.env.PORT || 10000);
 
 // =========================================================================
 // 6. MAIN BOT INIT & WHATSAPP CONNECTION
 // =========================================================================
-
 let sock = null;
 let isReconnecting = false;
 
@@ -332,7 +374,6 @@ async function initAndStart() {
             const senderJid = isGroup ? (msg.key.participant || remoteJid) : remoteJid;
             const senderNumber = senderJid.replace(/[^0-9]/g, '');
 
-            // Ekstrak Teks Pesan
             const msgText = (
                 msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
@@ -342,15 +383,13 @@ async function initAndStart() {
 
             if (remoteJid === 'status@broadcast') return;
 
-            // Memperbolehkan command bertanda ! atau . meskipun dari nomor bot sendiri
             const isCommand = msgText.startsWith('!') || msgText.startsWith('.');
             if (msg.key.fromMe && !isCommand) return;
 
-            // Normalisasi perintah (menghilangkan prefix ! dan .)
             const cleanCmd = msgText.replace(/^[!.]/, '').toLowerCase();
 
             // -----------------------------------------------------------------
-            // A. OCR ENGINE (PROSES BUKTI TRANSFER BERUPA GAMBAR)
+            // A. OCR ENGINE
             // -----------------------------------------------------------------
             const isImage = msg.message.imageMessage || msg.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
 
@@ -425,22 +464,51 @@ async function initAndStart() {
             }
 
             // -----------------------------------------------------------------
-            // B. COMMANDS (!rekening, .rekening, !bayar, .bayar, dll)
+            // B. COMMANDS
             // -----------------------------------------------------------------
             const isAdmin = ADMIN_NUMBERS.includes(senderNumber);
 
             if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
-                const replyText = 
-`💳 *PEMBAYARAN IPL CLUSTER ACACIA*
+                // Coba ambil dinamis dari Sheets dulu, kalau gagal gunakan fallback teks default
+                let replyText = await getRekeningInfoFromSheets();
 
-• **Bank:** Bank Mandiri
-• **No. Rekening:** 1840006586760
-• **A.N:** GALUH SUGIYANTI
+                if (!replyText) {
+                    replyText = 
+`🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
 
----
-*Atau via Virtual Account (VA):*
-• **VA:** \`85485 + [No Rumah] + 0\`
-  *(Contoh untuk CA 03-02: 85485CA03020)*`;
+Silakan melakukan pembayaran melalui salah satu metode berikut:
+
+*1️⃣ Transfer Bank*
+
+🏦 Bank : Mandiri
+👤 A/N : GALUH SUGIYANTI
+💳 No. Rekening :
+1840006586760
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+*2️⃣ Virtual Account (VA)*
+
+Bank Mandiri Virtual Account
+
+Format VA:
+85485 + Nomor Rumah + 0
+
+Contoh:
+• Rumah A01 → 85485A010
+• Rumah B12 → 85485B120
+• Rumah C105 → 85485C1050
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+📌 Setelah melakukan pembayaran, mohon kirim bukti transfer dengan mengetik:
+
+*.konfirmasi*
+
+atau kirim foto bukti transfer ke bot.
+
+Terima kasih 🙏`;
+                }
 
                 await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
             } 
@@ -456,12 +524,15 @@ async function initAndStart() {
                     await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
                 }
             }
+            else if (cleanCmd === 'konfirmasi') {
+                await sock.sendMessage(remoteJid, { text: "📸 Silakan *kirimkan foto/gambar bukti transfer* ke chat ini. Bot akan secara otomatis membaca dan memproses konfirmasi pembayaran Anda." }, { quoted: msg });
+            }
             else if (cleanCmd === 'status') {
                 if (!isAdmin) return;
                 await sock.sendMessage(remoteJid, { text: `🤖 *SYSTEM STATUS*\n• Connected: ${isConnectedToWA}\n• Queue Size: ${ocrQueueInstance.size}\n• Active Locks: ${activeHouseLocks.size}` }, { quoted: msg });
             }
             else if (cleanCmd === 'menu' || cleanCmd === 'help') {
-                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah yang tersedia:\n• *!rekening* / *.bayar* : Informasi nomor rekening kas & VA\n• *!tunggakan* / *.cek* : Cek daftar tagihan warga\n• *Kirim Foto Struk* : Konfirmasi pembayaran IPL otomatis` }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah yang tersedia:\n• *.bayar* / *.rekening* : Informasi nomor rekening & VA\n• *.cek* / *.tunggakan* : Cek daftar tagihan warga\n• *.konfirmasi* : Panduan konfirmasi pembayaran\n• *Kirim Foto Struk* : Konfirmasi otomatis via AI` }, { quoted: msg });
             }
         });
 
