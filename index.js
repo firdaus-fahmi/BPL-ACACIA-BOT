@@ -92,7 +92,7 @@ const model = genAI.getGenerativeModel({
     model: process.env.GEMINI_MODEL || "gemini-2.5-flash"
 });
 
-// MEMBACA CREDENTIALS.JSON SESUAI LOCATION DIRECTORY SCRIPT (FIX ENOENT)
+// MEMBACA CREDENTIALS.JSON SESUAI LOCATION DIRECTORY SCRIPT
 const credentialsPath = path.join(__dirname, 'credentials.json');
 
 const auth = new google.auth.GoogleAuth({
@@ -211,26 +211,36 @@ async function getPenunggakFromSheets() {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!A2:E1000`,
+            range: `'${WARGA_SHEET}'!A2:Z1000`,
         });
 
         const rows = res.data.values || [];
         
         return rows
-            .filter(row => row && row[0] && row[3] && row[3].toString().toUpperCase() !== 'LUNAS')
             .map(row => {
-                const rawNominal = row[4] || row[3] || "0";
+                if (!row || row.length === 0) return null;
+
+                // Index Kolom:
+                // row[2] = Kolom C (Nomor Rumah)
+                // row[3] = Kolom D (Nama Pemilik / Warga)
+                // row[4] / row[5] = Nominal Tunggakan
+                const noRumahVal = row[2] ? row[2].toString().trim() : "";
+                const namaVal = row[3] ? row[3].toString().trim() : "Warga";
+                
+                const rawNominal = row[5] || row[4] || "0";
                 const cleanNominalStr = rawNominal.toString().replace(/[^0-9]/g, '');
                 const parsedNominal = parseInt(cleanNominalStr, 10);
+                const totalNominal = isNaN(parsedNominal) ? 0 : parsedNominal;
+
+                if (!noRumahVal || totalNominal <= 0) return null;
 
                 return {
-                    no_rumah: normalizeHouseNumber(row[0] || "Tanpa No"),
-                    nama: row[1] ? row[1].trim() : "Warga",
-                    no_hp: row[2] ? row[2].toString().replace(/[^0-9]/g, '') : '',
-                    status: row[3] ? row[3].toString().trim() : 'UNPAID',
-                    total_tunggakan: isNaN(parsedNominal) ? 0 : parsedNominal
+                    no_rumah: noRumahVal,
+                    nama: namaVal,
+                    total_tunggakan: totalNominal
                 };
-            });
+            })
+            .filter(item => item !== null);
     });
 }
 
@@ -238,7 +248,7 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!A2:E1000`,
+            range: `'${WARGA_SHEET}'!A2:Z1000`,
         });
 
         const rows = res.data.values || [];
@@ -247,9 +257,10 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
         const targetNorm = normalizeHouseNumber(noRumah);
 
         for (let i = 0; i < rows.length; i++) {
-            if (rows[i][0] && normalizeHouseNumber(rows[i][0]) === targetNorm) {
+            const currentHouse = rows[i][2] ? normalizeHouseNumber(rows[i][2]) : "";
+            if (currentHouse === targetNorm) {
                 rowIndex = i + 2;
-                const rawVal = rows[i][4] || rows[i][3] || "210000";
+                const rawVal = rows[i][5] || rows[i][4] || "0";
                 currentSisaTagihan = parseInt(rawVal.toString().replace(/[^0-9]/g, ''), 10) || 0;
                 break;
             }
@@ -267,7 +278,7 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!D${rowIndex}:E${rowIndex}`,
+            range: `'${WARGA_SHEET}'!E${rowIndex}:F${rowIndex}`,
             valueInputOption: 'USER_ENTERED',
             resource: { values: [[newStatus, newSisa]] },
         });
@@ -545,8 +556,12 @@ Terima kasih 🙏`;
                                 ? w.total_tunggakan.toLocaleString('id-ID') 
                                 : "0";
 
-                            teks += `${i + 1}. *${namaWarga}* (${noRumah}) - Rp ${nominalFormatted}\n`;
+                            teks += `${i + 1}. *${noRumah}* (${namaWarga}) - Rp ${nominalFormatted}\n`;
                         });
+
+                        if (penunggak.length > 30) {
+                            teks += `\n_...dan ${penunggak.length - 30} rumah lainnya._`;
+                        }
 
                         await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
                     }
