@@ -239,7 +239,7 @@ app.get('/health', (req, res) => {
 app.listen(process.env.PORT || 10000);
 
 // =========================================================================
-// 6. MAIN BOT INIT & WHATSAPP CONNECTION (SINGLETON & SAFE RECONNECT)
+// 6. MAIN BOT INIT & WHATSAPP CONNECTION
 // =========================================================================
 
 let sock = null;
@@ -273,7 +273,8 @@ async function initAndStart() {
             auth: state,
             printQRInTerminal: false,
             logger: pino({ level: 'silent' }),
-            browser: ["Ubuntu", "Chrome", "20.0.04"]
+            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            syncFullHistory: false
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -315,9 +316,14 @@ async function initAndStart() {
         }
 
         // =================================================================
-        // HANDLING INCOMING MESSAGES (UPDATED UNTUK SUPPORT GROUP & SELF-MSG)
+        // HANDLING INCOMING MESSAGES
         // =================================================================
         sock.ev.on('messages.upsert', async m => {
+            console.log("============================");
+            console.log("MESSAGE MASUK");
+            console.log(JSON.stringify(m, null, 2));
+            console.log("============================");
+
             const msg = m.messages[0];
             if (!msg || !msg.message) return;
 
@@ -326,7 +332,7 @@ async function initAndStart() {
             const senderJid = isGroup ? (msg.key.participant || remoteJid) : remoteJid;
             const senderNumber = senderJid.replace(/[^0-9]/g, '');
 
-            // Ekstrak Teks Pesan dari berbagai tipe pesan WhatsApp
+            // Ekstrak Teks Pesan
             const msgText = (
                 msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
@@ -334,13 +340,14 @@ async function initAndStart() {
                 ''
             ).trim();
 
-            // Abaikan pesan broadcast / status / story
             if (remoteJid === 'status@broadcast') return;
 
-            // Jika pesan berasal dari nomor bot itu sendiri (fromMe), HANYA izinkan jika diawali '!' (Command Testing)
-            if (msg.key.fromMe && !msgText.startsWith('!')) return;
+            // Memperbolehkan command bertanda ! atau . meskipun dari nomor bot sendiri
+            const isCommand = msgText.startsWith('!') || msgText.startsWith('.');
+            if (msg.key.fromMe && !isCommand) return;
 
-            writeLog(`📩 Pesan masuk [${isGroup ? 'GROUP' : 'PRIVATE'}] dari ${senderNumber}: "${msgText || 'Image/Media'}"`);
+            // Normalisasi perintah (menghilangkan prefix ! dan .)
+            const cleanCmd = msgText.replace(/^[!.]/, '').toLowerCase();
 
             // -----------------------------------------------------------------
             // A. OCR ENGINE (PROSES BUKTI TRANSFER BERUPA GAMBAR)
@@ -418,15 +425,26 @@ async function initAndStart() {
             }
 
             // -----------------------------------------------------------------
-            // B. COMMANDS (!rekening, !tunggakan, !status, !menu)
+            // B. COMMANDS (!rekening, .rekening, !bayar, .bayar, dll)
             // -----------------------------------------------------------------
-            const cmd = msgText.toLowerCase();
             const isAdmin = ADMIN_NUMBERS.includes(senderNumber);
 
-            if (cmd === '!rekening' || cmd === '!bayar') {
-                await sock.sendMessage(remoteJid, { text: `💳 *REKENING KAS CLUSTER ACACIA*\n\n• Bank: *BCA*\n• No. Rekening: *1234-5678-90*\n• A.N: *Kas Cluster Acacia*` }, { quoted: msg });
+            if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
+                const replyText = 
+`💳 *PEMBAYARAN IPL CLUSTER ACACIA*
+
+• **Bank:** Bank Mandiri
+• **No. Rekening:** 1840006586760
+• **A.N:** GALUH SUGIYANTI
+
+---
+*Atau via Virtual Account (VA):*
+• **VA:** \`85485 + [No Rumah] + 0\`
+  *(Contoh untuk CA 03-02: 85485CA03020)*`;
+
+                await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
             } 
-            else if (cmd === '!tunggakan' || cmd === '!cek') {
+            else if (cleanCmd === 'tunggakan' || cleanCmd === 'cek') {
                 const penunggak = await getPenunggakFromSheets();
                 if (penunggak.length === 0) {
                     await sock.sendMessage(remoteJid, { text: "🎉 *LUNAS SEMUA!* Semua warga telah melunasi IPL." }, { quoted: msg });
@@ -438,12 +456,12 @@ async function initAndStart() {
                     await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
                 }
             }
-            else if (cmd === '!status') {
+            else if (cleanCmd === 'status') {
                 if (!isAdmin) return;
                 await sock.sendMessage(remoteJid, { text: `🤖 *SYSTEM STATUS*\n• Connected: ${isConnectedToWA}\n• Queue Size: ${ocrQueueInstance.size}\n• Active Locks: ${activeHouseLocks.size}` }, { quoted: msg });
             }
-            else if (cmd === '!menu' || cmd === '!help') {
-                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah yang tersedia:\n• *!rekening* : Informasi nomor rekening kas\n• *!tunggakan* : Cek daftar tagihan warga\n• *Kirim Foto Struk* : Konfirmasi pembayaran IPL otomatis` }, { quoted: msg });
+            else if (cleanCmd === 'menu' || cleanCmd === 'help') {
+                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah yang tersedia:\n• *!rekening* / *.bayar* : Informasi nomor rekening kas & VA\n• *!tunggakan* / *.cek* : Cek daftar tagihan warga\n• *Kirim Foto Struk* : Konfirmasi pembayaran IPL otomatis` }, { quoted: msg });
             }
         });
 
