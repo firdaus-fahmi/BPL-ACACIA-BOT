@@ -145,7 +145,6 @@ function validateOCRData(data, rawText) {
     return { valid: true, normalizedHouse: normHouse };
 }
 
-// Fungsi Mengambil Konfigurasi Rekening Dinamis dari Sheet 'Setting'
 async function getRekeningInfoFromSheets() {
     try {
         const res = await sheets.spreadsheets.values.get({
@@ -195,10 +194,11 @@ atau kirim foto bukti transfer ke bot.
 
 Terima kasih 🙏`;
     } catch (err) {
-        return null; // Fallback otomatis ke pesan default jika sheet Setting belum ada
+        return null;
     }
 }
 
+// SAFE GETTER UNTUK DAFTAR PENUNGGAK
 async function getPenunggakFromSheets() {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
@@ -207,13 +207,23 @@ async function getPenunggakFromSheets() {
         });
 
         const rows = res.data.values || [];
-        return rows.filter(row => row[3] && row[3].toUpperCase() !== 'LUNAS').map(row => ({
-            no_rumah: normalizeHouseNumber(row[0]),
-            nama: row[1],
-            no_hp: row[2] ? row[2].replace(/[^0-9]/g, '') : '',
-            status: row[3],
-            total_tunggakan: parseInt(row[4] || "0")
-        }));
+        
+        return rows
+            .filter(row => row && row[0] && row[3] && row[3].toString().toUpperCase() !== 'LUNAS')
+            .map(row => {
+                // Parsing nominal tunggakan aman dari string / undefined / null
+                const rawNominal = row[4] || row[3] || "0";
+                const cleanNominalStr = rawNominal.toString().replace(/[^0-9]/g, '');
+                const parsedNominal = parseInt(cleanNominalStr, 10);
+
+                return {
+                    no_rumah: normalizeHouseNumber(row[0] || "Tanpa No"),
+                    nama: row[1] ? row[1].trim() : "Warga",
+                    no_hp: row[2] ? row[2].toString().replace(/[^0-9]/g, '') : '',
+                    status: row[3] ? row[3].toString().trim() : 'UNPAID',
+                    total_tunggakan: isNaN(parsedNominal) ? 0 : parsedNominal
+                };
+            });
     });
 }
 
@@ -232,7 +242,8 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
         for (let i = 0; i < rows.length; i++) {
             if (rows[i][0] && normalizeHouseNumber(rows[i][0]) === targetNorm) {
                 rowIndex = i + 2;
-                currentSisaTagihan = parseInt(rows[i][4] || rows[i][3] || "210000");
+                const rawVal = rows[i][4] || rows[i][3] || "210000";
+                currentSisaTagihan = parseInt(rawVal.toString().replace(/[^0-9]/g, ''), 10) || 0;
                 break;
             }
         }
@@ -382,11 +393,11 @@ async function initAndStart() {
 
             if (remoteJid === 'status@broadcast') return;
 
-            // Izinkan eksekusi command bernombor prefix . / ! dari nomor bot sendiri saat pengujian
             const isCommand = msgText.startsWith('!') || msgText.startsWith('.');
             if (msg.key.fromMe && !isCommand) return;
 
-            const cleanCmd = msgText.replace(/^[!.]/, '').toLowerCase();
+            // Parser Pembersihan Prefix
+            const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
             // A. OCR ENGINE
@@ -464,15 +475,13 @@ async function initAndStart() {
             }
 
             // -----------------------------------------------------------------
-            // B. COMMANDS
+            // B. COMMAND HANDLERS
             // -----------------------------------------------------------------
             const isAdmin = ADMIN_NUMBERS.includes(senderNumber);
 
             if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
-                // Ambil data dinamis dari sheet 'Setting'
                 let replyText = await getRekeningInfoFromSheets();
 
-                // Fallback default jika Sheet 'Setting' belum dikonfigurasi
                 if (!replyText) {
                     replyText = 
 `🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
@@ -514,15 +523,32 @@ Terima kasih 🙏`;
                 await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
             } 
             else if (cleanCmd === 'tunggakan' || cleanCmd === 'cek') {
-                const penunggak = await getPenunggakFromSheets();
-                if (penunggak.length === 0) {
-                    await sock.sendMessage(remoteJid, { text: "🎉 *LUNAS SEMUA!* Semua warga telah melunasi IPL." }, { quoted: msg });
-                } else {
-                    let teks = `📊 *DAFTAR UNPAID IPL (${penunggak.length} Rumah)*\n\n`;
-                    penunggak.slice(0, 30).forEach((w, i) => {
-                        teks += `${i + 1}. *${w.nama}* (${w.no_rumah}) - Rp ${w.total_tunggakan.toLocaleString('id-ID')}\n`;
-                    });
-                    await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
+                try {
+                    writeLog(`🔍 Memproses command !tunggakan dari ${senderNumber}`);
+                    const penunggak = await getPenunggakFromSheets();
+                    
+                    if (!penunggak || penunggak.length === 0) {
+                        await sock.sendMessage(remoteJid, { text: "🎉 *LUNAS SEMUA!* Semua warga telah melunasi IPL." }, { quoted: msg });
+                    } else {
+                        let teks = `📊 *DAFTAR UNPAID IPL (${penunggak.length} Rumah)*\n\n`;
+                        
+                        penunggak.slice(0, 30).forEach((w, i) => {
+                            const namaWarga = w.nama || "Warga";
+                            const noRumah = w.no_rumah || "-";
+                            const nominalFormatted = typeof w.total_tunggakan === 'number' 
+                                ? w.total_tunggakan.toLocaleString('id-ID') 
+                                : "0";
+
+                            teks += `${i + 1}. *${namaWarga}* (${noRumah}) - Rp ${nominalFormatted}\n`;
+                        });
+
+                        await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
+                    }
+                } catch (err) {
+                    writeLog(`❌ ERROR COMMAND TUNGGAKAN: ${err.stack || err.message}`);
+                    await sock.sendMessage(remoteJid, { 
+                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan tab nama sheet *'2026 ALL'* telah dikonfigurasi dengan benar di Google Sheets.` 
+                    }, { quoted: msg });
                 }
             }
             else if (cleanCmd === 'konfirmasi') {
