@@ -145,6 +145,7 @@ function validateOCRData(data, rawText) {
     return { valid: true, normalizedHouse: normHouse };
 }
 
+// Fungsi Mengambil Konfigurasi Rekening Dinamis dari Sheet 'Setting'
 async function getRekeningInfoFromSheets() {
     try {
         const res = await sheets.spreadsheets.values.get({
@@ -174,12 +175,15 @@ ${config.ACCOUNT_NUMBER}
 
 *2️⃣ Virtual Account (VA)*
 
+Bank ${config.BANK} Virtual Account
+
 Format VA:
 ${config.VA_PREFIX || '85485'} + Nomor Rumah + 0
 
 Contoh:
 • Rumah A01 → ${config.VA_PREFIX || '85485'}A010
 • Rumah B12 → ${config.VA_PREFIX || '85485'}B120
+• Rumah C105 → ${config.VA_PREFIX || '85485'}C1050
 
 ━━━━━━━━━━━━━━━━━━━━━━
 
@@ -187,11 +191,11 @@ Contoh:
 
 *.konfirmasi*
 
-atau langsung kirim foto bukti transfer ke bot.
+atau kirim foto bukti transfer ke bot.
 
 Terima kasih 🙏`;
     } catch (err) {
-        return null; // Fallback jika sheet 'Setting' belum dibuat
+        return null; // Fallback otomatis ke pesan default jika sheet Setting belum ada
     }
 }
 
@@ -361,11 +365,6 @@ async function initAndStart() {
         // HANDLING INCOMING MESSAGES
         // =================================================================
         sock.ev.on('messages.upsert', async m => {
-            console.log("============================");
-            console.log("MESSAGE MASUK");
-            console.log(JSON.stringify(m, null, 2));
-            console.log("============================");
-
             const msg = m.messages[0];
             if (!msg || !msg.message) return;
 
@@ -383,6 +382,7 @@ async function initAndStart() {
 
             if (remoteJid === 'status@broadcast') return;
 
+            // Izinkan eksekusi command bernombor prefix . / ! dari nomor bot sendiri saat pengujian
             const isCommand = msgText.startsWith('!') || msgText.startsWith('.');
             if (msg.key.fromMe && !isCommand) return;
 
@@ -469,9 +469,10 @@ async function initAndStart() {
             const isAdmin = ADMIN_NUMBERS.includes(senderNumber);
 
             if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
-                // Coba ambil dinamis dari Sheets dulu, kalau gagal gunakan fallback teks default
+                // Ambil data dinamis dari sheet 'Setting'
                 let replyText = await getRekeningInfoFromSheets();
 
+                // Fallback default jika Sheet 'Setting' belum dikonfigurasi
                 if (!replyText) {
                     replyText = 
 `🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
