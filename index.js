@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const { default: makeWASocket, useMultiFileAuthState, delay, downloadMediaMessage, DisconnectReason } = require('@whiskeysockets/baileys');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
