@@ -27,6 +27,11 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const BOT_NUMBER = process.env.BOT_NUMBER;
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().replace(/[^0-9]/g, ''));
 
+// Variabel Nama Sheet Dinamis (Dapat diubah via .env)
+const WARGA_SHEET = process.env.WARGA_SHEET || '2026 ALL';
+const SETTING_SHEET = process.env.SETTING_SHEET || 'Setting';
+const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
+
 let isConnectedToWA = false;
 let ocrQueueInstance = null;
 
@@ -149,7 +154,7 @@ async function getRekeningInfoFromSheets() {
     try {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: "'Setting'!A2:B10",
+            range: `'${SETTING_SHEET}'!A2:B10`,
         });
         const rows = res.data.values || [];
         if (rows.length === 0) return null;
@@ -198,12 +203,11 @@ Terima kasih 🙏`;
     }
 }
 
-// SAFE GETTER UNTUK DAFTAR PENUNGGAK
 async function getPenunggakFromSheets() {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: "'2026 ALL'!A2:E1000",
+            range: `'${WARGA_SHEET}'!A2:E1000`,
         });
 
         const rows = res.data.values || [];
@@ -211,7 +215,6 @@ async function getPenunggakFromSheets() {
         return rows
             .filter(row => row && row[0] && row[3] && row[3].toString().toUpperCase() !== 'LUNAS')
             .map(row => {
-                // Parsing nominal tunggakan aman dari string / undefined / null
                 const rawNominal = row[4] || row[3] || "0";
                 const cleanNominalStr = rawNominal.toString().replace(/[^0-9]/g, '');
                 const parsedNominal = parseInt(cleanNominalStr, 10);
@@ -231,7 +234,7 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: "'2026 ALL'!A2:E1000",
+            range: `'${WARGA_SHEET}'!A2:E1000`,
         });
 
         const rows = res.data.values || [];
@@ -260,7 +263,7 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'2026 ALL'!D${rowIndex}:E${rowIndex}`,
+            range: `'${WARGA_SHEET}'!D${rowIndex}:E${rowIndex}`,
             valueInputOption: 'USER_ENTERED',
             resource: { values: [[newStatus, newSisa]] },
         });
@@ -268,7 +271,7 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
         const dateStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
         await sheets.spreadsheets.values.append({
             spreadsheetId: SPREADSHEET_ID,
-            range: "'HISTORI_PEMBAYARAN'!A:G",
+            range: `'${HISTORI_SHEET}'!A:G`,
             valueInputOption: 'USER_ENTERED',
             resource: {
                 values: [[dateStr, targetNorm, nominal, sender, imageHash, newStatus, rawGeminiText.substring(0, 300)]]
@@ -396,7 +399,6 @@ async function initAndStart() {
             const isCommand = msgText.startsWith('!') || msgText.startsWith('.');
             if (msg.key.fromMe && !isCommand) return;
 
-            // Parser Pembersihan Prefix
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
@@ -547,7 +549,7 @@ Terima kasih 🙏`;
                 } catch (err) {
                     writeLog(`❌ ERROR COMMAND TUNGGAKAN: ${err.stack || err.message}`);
                     await sock.sendMessage(remoteJid, { 
-                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan tab nama sheet *'2026 ALL'* telah dikonfigurasi dengan benar di Google Sheets.` 
+                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan tab nama sheet *'${WARGA_SHEET}'* telah dikonfigurasi dengan benar di Google Sheets.` 
                     }, { quoted: msg });
                 }
             }
