@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const retry = require('async-retry');
-const PQueue = require('p-queue'); // Menggunakan PQueue CommonJS
+const PQueue = require('p-queue'); // Menggunakan PQueue CommonJS (v6.6.2)
 
 // =========================================================================
 // 1. VALIDASI ENVIRONMENT VARIABLES
@@ -86,7 +86,6 @@ cron.schedule('0 2 * * *', performDatabaseBackup);
 // 3. GOOGLE API & RETRY MECHANISM
 // =========================================================================
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-// Fallback ke model gemini-1.5-flash-latest yang stabil
 const geminiModelName = process.env.GEMINI_MODEL || "gemini-1.5-flash-latest";
 const model = genAI.getGenerativeModel({ model: geminiModelName });
 
@@ -433,4 +432,173 @@ async function initAndStart() {
                         const result = await model.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
                         const rawGeminiText = result.response.text();
                         
-                        const cleanJsonText = rawGeminiText.replace(/```json|
+                        // DI SINI BARIS YANG SEBELUMNYA ERROR (SUDAH DIPERBAIKI AMAN):
+                        const cleanJsonText = rawGeminiText.replace(/```json/gi, '').replace(/```/g, '').trim();
+                        const jsonMatch = cleanJsonText.match(/\{[\s\S]*\}/);
+
+                        if (!jsonMatch) throw new Error("AI tidak menemukan format JSON valid dari gambar ini");
+                        const data = JSON.parse(jsonMatch[0]);
+
+                        const ocrVal = validateOCRData(data, cleanJsonText);
+                        if (!ocrVal.valid) {
+                            await sock.sendMessage(remoteJid, { text: `⚠️ Foto tidak memenuhi syarat konfirmasi otomatis (${ocrVal.reason}). Kirimkan foto yang lebih jelas.` }, { quoted: msg });
+                            return;
+                        }
+
+                        const targetNorm = ocrVal.normalizedHouse;
+
+                        if (activeHouseLocks.has(targetNorm)) {
+                            await sock.sendMessage(remoteJid, { text: `⏳ Pembayaran untuk rumah ${targetNorm} sedang diproses. Mohon tunggu sebentar.` }, { quoted: msg });
+                            return;
+                        }
+
+                        activeHouseLocks.add(targetNorm);
+
+                        try {
+                            if (data.nominal < 10000 || data.nominal > 20000000) {
+                                await sock.sendMessage(remoteJid, { text: `⚠️ Nominal Rp ${data.nominal.toLocaleString('id-ID')} terdeteksi di luar batas wajar. Hubungi Bendahara.` }, { quoted: msg });
+                                return;
+                            }
+
+                            const updateRes = await processPaymentAndLog(targetNorm, data.nominal, senderNumber, imageHash, rawGeminiText);
+
+                            if (updateRes.success) {
+                                db.prepare("INSERT INTO processed_hashes (hash) VALUES (?)").run(imageHash);
+                                let replyText = `✅ *PEMBAYARAN IPL TERKONFIRMASI*\n\n• No. Rumah: *${targetNorm}*\n• Nominal Masuk: *Rp ${data.nominal.toLocaleString('id-ID')}*\n• Status Tagihan: *${updateRes.status}*`;
+                                await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
+                            } else {
+                                await sock.sendMessage(remoteJid, { text: `❌ Nomor rumah *${targetNorm}* tidak ditemukan di data Google Sheets!` }, { quoted: msg });
+                            }
+                        } finally {
+                            activeHouseLocks.delete(targetNorm);
+                        }
+
+                    } catch (err) {
+                        writeLog(`❌ OCR Processing Error: ${err.message}`);
+                        await sock.sendMessage(remoteJid, { text: `⚠️ Gagal memproses gambar: ${err.message}. Pastikan gambar yang dikirim jelas.` }, { quoted: msg });
+                    }
+                });
+            }
+
+            // -----------------------------------------------------------------
+            // B. COMMAND HANDLERS (Teks Pesan)
+            // -----------------------------------------------------------------
+            const isAdmin = ADMIN_NUMBERS.includes(senderNumber);
+
+            if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
+                let replyText = await getRekeningInfoFromSheets();
+
+                if (!replyText) {
+                    replyText = 
+`🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
+
+Silakan melakukan pembayaran melalui salah satu metode berikut:
+
+*1️⃣ Transfer Bank*
+
+🏦 Bank : Mandiri
+👤 A/N : GALUH SUGIYANTI
+💳 No. Rekening :
+1840006586760
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+*2️⃣ Virtual Account (VA)*
+
+Bank Mandiri Virtual Account
+
+Format VA:
+85485 + Nomor Rumah + 0
+
+Contoh:
+• Rumah A01 → 85485A010
+• Rumah B12 → 85485B120
+• Rumah C105 → 85485C1050
+
+━━━━━━━━━━━━━━━━━━━━━━
+
+📌 Setelah melakukan pembayaran, mohon kirim bukti transfer dengan mengetik:
+
+*.konfirmasi*
+
+atau kirim foto bukti transfer ke bot.
+
+Terima kasih 🙏`;
+                }
+
+                await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
+            } 
+            else if (cleanCmd === 'tunggakan' || cleanCmd === 'cek') {
+                try {
+                    writeLog(`🔍 Memproses command !tunggakan dari ${senderNumber}`);
+                    const penunggak = await getPenunggakFromSheets();
+                    
+                    if (!penunggak || penunggak.length === 0) {
+                        await sock.sendMessage(remoteJid, { text: "🎉 *LUNAS SEMUA!* Semua warga telah melunasi IPL." }, { quoted: msg });
+                    } else {
+                        let teks = `📊 *DAFTAR BELUM BAYAR IPL (${penunggak.length} Rumah)*\n\n`;
+                        
+                        penunggak.forEach((w, i) => {
+                            const namaWarga = w.nama || "Warga";
+                            const noRumah = w.no_rumah || "-";
+                            const nominalFormatted = typeof w.total_tunggakan === 'number' 
+                                ? w.total_tunggakan.toLocaleString('id-ID') 
+                                : "0";
+
+                            teks += `${i + 1}. *${noRumah}* (${namaWarga}) - Rp ${nominalFormatted}\n`;
+                        });
+
+                        await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
+                    }
+                } catch (err) {
+                    writeLog(`❌ ERROR COMMAND TUNGGAKAN: ${err.stack || err.message}`);
+                    await sock.sendMessage(remoteJid, { 
+                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan file *credentials.json* ada di folder bot dan tab nama sheet *'${WARGA_SHEET}'* sudah sesuai.` 
+                    }, { quoted: msg });
+                }
+            }
+            else if (cleanCmd === 'konfirmasi') {
+                await sock.sendMessage(remoteJid, { text: "📸 Silakan *kirimkan foto/gambar bukti transfer* ke chat ini. Bot akan secara otomatis membaca dan memproses konfirmasi pembayaran Anda." }, { quoted: msg });
+            }
+            else if (cleanCmd === 'status') {
+                if (!isAdmin) return;
+                await sock.sendMessage(remoteJid, { text: `🤖 *SYSTEM STATUS*\n• Connected: ${isConnectedToWA}\n• Queue Size: ${ocrQueueInstance.size}\n• Active Locks: ${activeHouseLocks.size}` }, { quoted: msg });
+            }
+            else if (cleanCmd === 'menu' || cleanCmd === 'help') {
+                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah yang tersedia:\n• *.bayar* / *.rekening* : Informasi nomor rekening & VA\n• *.cek* / *.tunggakan* : Cek daftar tagihan warga\n• *.konfirmasi* : Panduan konfirmasi pembayaran\n• *Kirim Foto Struk* : Konfirmasi otomatis via AI` }, { quoted: msg });
+            }
+        });
+
+    } catch (err) {
+        writeLog(`❌ Fatal Error di initAndStart: ${err.message}`);
+        isReconnecting = false;
+    }
+}
+
+// -------------------------------------------------------------------------
+// C. GRACEFUL SHUTDOWN HANDLER
+// -------------------------------------------------------------------------
+const handleShutdown = async (signal) => {
+    writeLog(`⚠️ Signal ${signal} diterima. Memulai Graceful Shutdown...`);
+    
+    ocrQueueInstance.clear();
+
+    if (sock) {
+        try { sock.end(undefined); } catch (e) {}
+    }
+
+    try {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+        db.close();
+        writeLog("✅ SQLite Database closed cleanly.");
+    } catch (e) {
+        writeLog(`❌ Error closing DB: ${e.message}`);
+    }
+
+    process.exit(0);
+};
+
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT', () => handleShutdown('SIGINT'));
+
+initAndStart();
