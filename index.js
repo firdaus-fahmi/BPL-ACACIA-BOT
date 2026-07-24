@@ -25,7 +25,7 @@ const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().rep
 
 // Definisi Nama Sheet
 const SHEET_WARGA_ALL = '2026 ALL'; // Untuk update pembayaran & cross-check
-const SHEET_TUNGGAKAN = 'RT003';    // Khusus untuk pengecekan !tunggakan
+const SHEET_TUNGGAKAN = process.env.SHEET_TUNGGAKAN || 'TAGIHAN 2RT'; // Khusus untuk pengecekan !tunggakan
 const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
 
 const NOMINAL_IURAN_PER_BULAN = 210000;
@@ -96,15 +96,15 @@ async function fetchSheetsWithRetry(fn) {
 }
 
 // =========================================================================
-// 4. HELPER & LOGIKA BISNIS (PERBAIKAN MATCHING RUMAH)
+// 4. HELPER & LOGIKA BISNIS
 // =========================================================================
 
-// Membersihkan string menjadi hanya Karakter Alfanumerik Kapital (Misal: "CA 19-08" -> "CA1908")
+// Normalisasi String Alfanumerik (Misal: "CA 19-08" -> "CA1908")
 function normalizeHouseNumber(raw) {
     return raw ? raw.toString().toUpperCase().replace(/[^A-Z0-9]/g, '') : "";
 }
 
-// Membersihkan hanya Angka tanpa membuang angka 0 (Misal: "CA 19-08" -> "1908")
+// Ekstrak Angka tanpa menghapus 0 (Misal: "CA 19-08" -> "1908")
 function extractDigitsStrict(raw) {
     return raw ? raw.toString().replace(/[^0-9]/g, '') : "";
 }
@@ -155,7 +155,7 @@ Terima kasih 🙏`;
 }
 
 // -------------------------------------------------------------------------
-// FITUR 1: CEK TUNGGAKAN / TAGIHAN (SHEET 'RT003')
+// FITUR 1: CEK TUNGGAKAN / TAGIHAN (SHEET 'TAGIHAN 2RT')
 // -------------------------------------------------------------------------
 async function checkTagihanWarga(noRumah) {
     return await fetchSheetsWithRetry(async () => {
@@ -178,8 +178,6 @@ async function checkTagihanWarga(noRumah) {
             const normalizedSheet = normalizeHouseNumber(sheetValue);
             const digitsSheet = extractDigitsStrict(sheetValue);
 
-            // Pencocokan 1: Alfanumerik persis (Misal: "CA1908" === "CA1908")
-            // Pencocokan 2: Angka persis (Misal: "1908" === "1908")
             if ((normalizedInput && normalizedInput === normalizedSheet) || 
                 (digitsInput && digitsSheet && digitsInput === digitsSheet)) {
                 foundRow = rows[i];
@@ -425,7 +423,7 @@ async function initAndStart() {
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
-            // COMMAND !tunggakan / !cektagihan / !tagihan (Sheet: RT003)
+            // COMMAND !tunggakan / !cektagihan / !tagihan (Sheet: TAGIHAN 2RT)
             // -----------------------------------------------------------------
             if (cleanCmd.startsWith('cektagihan') || cleanCmd.startsWith('tunggakan') || cleanCmd.startsWith('tagihan')) {
                 const args = msgText
@@ -439,7 +437,7 @@ async function initAndStart() {
                     return;
                 }
 
-                await sock.sendMessage(remoteJid, { text: `⏳ *Memeriksa data tunggakan untuk ${args} pada Sheet RT003...*` }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: `⏳ *Memeriksa data tunggakan untuk ${args} pada Sheet ${SHEET_TUNGGAKAN}...*` }, { quoted: msg });
 
                 try {
                     const tagihan = await checkTagihanWarga(args);
@@ -447,7 +445,7 @@ async function initAndStart() {
                     if (tagihan.success) {
                         if (tagihan.totalMonths === 0) {
                             const resMsg = 
-`🎉 *INFORMASI TUNGGAKAN IPL (RT003)*
+`🎉 *INFORMASI TUNGGAKAN IPL (${SHEET_TUNGGAKAN})*
 
 • Rumah: *${tagihan.houseNumber}*
 • Status: *LUNAS TOTAL (12 Bulan)*
@@ -456,7 +454,7 @@ Seluruh iuran IPL tahun 2026 sudah terbayarkan. Tidak ada tunggakan. Terima kasi
                             await sock.sendMessage(remoteJid, { text: resMsg }, { quoted: msg });
                         } else {
                             const resMsg = 
-`📋 *INFORMASI TUNGGAKAN IPL 2026 (RT003)*
+`📋 *INFORMASI TUNGGAKAN IPL 2026 (${SHEET_TUNGGAKAN})*
 
 • Rumah: *${tagihan.houseNumber}*
 • Total Tunggakan: *${tagihan.totalMonths} Bulan*
