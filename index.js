@@ -23,15 +23,15 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const BOT_NUMBER = process.env.BOT_NUMBER;
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().replace(/[^0-9]/g, ''));
 
-// Definisi Nama Sheet
-const SHEET_WARGA_ALL = '2026 ALL'; // Untuk update pembayaran & cross-check
-const SHEET_TUNGGAKAN = process.env.SHEET_TUNGGAKAN || 'TAGIHAN 2RT'; // Khusus untuk pengecekan !tunggakan
-const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
+const WARGA_SHEET = (process.env.WARGA_SHEET && process.env.WARGA_SHEET !== 'TAGIHAN 2RT 19072026') 
+    ? process.env.WARGA_SHEET 
+    : '2026 ALL';
 
+const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
 const NOMINAL_IURAN_PER_BULAN = 210000;
 let isConnectedToWA = false;
 
-// Mapping Kolom Google Sheets untuk Sheet (Jan s/d Des)
+// Mapping Kolom Google Sheets untuk "2026 ALL"
 // Kolom C: No Rumah (Index Array: 2)
 // Jan: E/F (Idx 4,5) | Feb: G/H (Idx 6,7) | Mar: I/J (Idx 8,9) ... dst.
 const MONTH_COLUMN_MAP = {
@@ -98,15 +98,8 @@ async function fetchSheetsWithRetry(fn) {
 // =========================================================================
 // 4. HELPER & LOGIKA BISNIS
 // =========================================================================
-
-// Normalisasi String Alfanumerik (Misal: "CA 19-08" -> "CA1908")
-function normalizeHouseNumber(raw) {
-    return raw ? raw.toString().toUpperCase().replace(/[^A-Z0-9]/g, '') : "";
-}
-
-// Ekstrak Angka tanpa menghapus 0 (Misal: "CA 19-08" -> "1908")
-function extractDigitsStrict(raw) {
-    return raw ? raw.toString().replace(/[^0-9]/g, '') : "";
+function extractDigits(raw) {
+    return raw ? raw.replace(/[^0-9]/g, '').replace(/^0+/, '') : "";
 }
 
 function generateMonthList(bulanText, totalBulan) {
@@ -127,67 +120,33 @@ function generateMonthList(bulanText, totalBulan) {
     return LIST_BULAN.slice(0, totalBulan);
 }
 
-function getDefaultPaymentInfo() {
-    return `🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
-
-Silakan melakukan pembayaran melalui Virtual Account berikut:
-
-💳 *Virtual Account (VA) Bank Mandiri*
-Format VA: 85485 + Nomor Rumah + 0
-
-Contoh:
-• Rumah CA 03-01 ➔ 8548503010
-• Rumah CA 18-02 ➔ 8548518020
-
-━━━━━━━━━━━━━━━━━━━━━━
-📌 *PETUNJUK BOT:*
-
-1️⃣ *Cek Tunggakan:*
-   👉 \`!tunggakan <No_Rumah>\`
-   Contoh: \`!tunggakan CA 03-09\`
-   Contoh: \`!tunggakan CA1908\`
-
-2️⃣ *Konfirmasi Pembayaran:*
-   👉 \`<No_Rumah> <Bulan> <Nominal>\`
-   Contoh: \`CA0309 Januari-Desember 2520000\`
-
-Terima kasih 🙏`;
-}
-
 // -------------------------------------------------------------------------
-// FITUR 1: CEK TUNGGAKAN / TAGIHAN (SHEET 'TAGIHAN 2RT')
+// FITUR 1: CEK TAGIHAN (!cektagihan <no_rumah>)
 // -------------------------------------------------------------------------
 async function checkTagihanWarga(noRumah) {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${SHEET_TUNGGAKAN}'!A5:AB1000`,
+            range: `'${WARGA_SHEET}'!A5:AB1000`,
         });
 
         const rows = res.data.values || [];
-        const normalizedInput = normalizeHouseNumber(noRumah);
-        const digitsInput = extractDigitsStrict(noRumah);
-
+        const inputDigits = extractDigits(noRumah);
         let foundRow = null;
         let houseDisplayInSheet = noRumah.toUpperCase();
 
         for (let i = 0; i < rows.length; i++) {
             if (!rows[i] || !rows[i][2]) continue;
-            
-            const sheetValue = rows[i][2].toString();
-            const normalizedSheet = normalizeHouseNumber(sheetValue);
-            const digitsSheet = extractDigitsStrict(sheetValue);
-
-            if ((normalizedInput && normalizedInput === normalizedSheet) || 
-                (digitsInput && digitsSheet && digitsInput === digitsSheet)) {
+            const sheetDigits = extractDigits(rows[i][2]);
+            if (inputDigits && sheetDigits && inputDigits === sheetDigits) {
                 foundRow = rows[i];
-                houseDisplayInSheet = sheetValue.trim();
+                houseDisplayInSheet = rows[i][2].toString().trim();
                 break;
             }
         }
 
         if (!foundRow) {
-            return { success: false, reason: `Nomor rumah '${noRumah}' tidak ditemukan di Sheet '${SHEET_TUNGGAKAN}'.` };
+            return { success: false, reason: `Nomor rumah '${noRumah}' tidak ditemukan di Sheet '${WARGA_SHEET}'.` };
         }
 
         const bulanUnpaid = [];
@@ -196,6 +155,7 @@ async function checkTagihanWarga(noRumah) {
             const hasDate = foundRow[config.tglIdx] && foundRow[config.tglIdx].trim() !== "";
             const hasNominal = foundRow[config.nomIdx] && foundRow[config.nomIdx].trim() !== "";
 
+            // Jika tanggal/nominal belum diisi, maka dianggap belum bayar
             if (!hasDate && !hasNominal) {
                 bulanUnpaid.push(m);
             }
@@ -214,13 +174,13 @@ async function checkTagihanWarga(noRumah) {
 }
 
 // -------------------------------------------------------------------------
-// FITUR 2: PROSES PEMBAYARAN + CROSS CHECK OVERPAYMENT (SHEET '2026 ALL')
+// FITUR 2: PROSES PEMBAYARAN + CROSS CHECK OVERPAYMENT
 // -------------------------------------------------------------------------
 async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${SHEET_WARGA_ALL}'!A5:AB1000`,
+            range: `'${WARGA_SHEET}'!A5:AB1000`,
         });
 
         const rows = res.data.values || [];
@@ -228,27 +188,22 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         let houseDisplayInSheet = noRumah.toUpperCase();
         let targetRowData = null;
 
-        const normalizedInput = normalizeHouseNumber(noRumah);
-        const digitsInput = extractDigitsStrict(noRumah);
+        const inputDigits = extractDigits(noRumah);
 
         for (let i = 0; i < rows.length; i++) {
             if (!rows[i] || !rows[i][2]) continue;
+            const sheetDigits = extractDigits(rows[i][2]);
 
-            const sheetValue = rows[i][2].toString();
-            const normalizedSheet = normalizeHouseNumber(sheetValue);
-            const digitsSheet = extractDigitsStrict(sheetValue);
-
-            if ((normalizedInput && normalizedInput === normalizedSheet) || 
-                (digitsInput && digitsSheet && digitsInput === digitsSheet)) {
+            if (inputDigits && sheetDigits && inputDigits === sheetDigits) {
                 rowIndex = i + 5; 
-                houseDisplayInSheet = sheetValue.trim();
+                houseDisplayInSheet = rows[i][2].toString().trim();
                 targetRowData = rows[i];
                 break;
             }
         }
 
         if (rowIndex === -1) {
-            return { success: false, reason: `Rumah '${noRumah}' tidak ditemukan di Kolom C Sheet '${SHEET_WARGA_ALL}'.` };
+            return { success: false, reason: `Rumah '${noRumah}' tidak ditemukan di Kolom C Sheet '${WARGA_SHEET}'.` };
         }
 
         const totalBulanDibayar = Math.floor(nominal / NOMINAL_IURAN_PER_BULAN) || 1;
@@ -257,7 +212,7 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         const unpaidMonthsToProcess = [];
         const alreadyPaidMonths = [];
 
-        // Cross Check Pembayaran
+        // CROSS CHECK: Cek apakah bulan dalam range target tersebut sudah dibayar
         targetMonths.forEach(m => {
             const config = MONTH_COLUMN_MAP[m];
             const hasDate = targetRowData[config.tglIdx] && targetRowData[config.tglIdx].toString().trim() !== "";
@@ -270,6 +225,7 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
             }
         });
 
+        // Tanggal Hari Ini (dd/mm/yyyy)
         const today = new Date();
         const dd = String(today.getDate()).padStart(2, '0');
         const mm = String(today.getMonth() + 1).padStart(2, '0');
@@ -280,21 +236,23 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         const historyRows = [];
         const dateLogStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
 
+        // Proses hanya bulan yang BELUM dibayar
         unpaidMonthsToProcess.forEach(monthName => {
             const colConfig = MONTH_COLUMN_MAP[monthName];
             if (colConfig) {
                 updateBatch.push({
-                    range: `'${SHEET_WARGA_ALL}'!${colConfig.tglCol}${rowIndex}`,
+                    range: `'${WARGA_SHEET}'!${colConfig.tglCol}${rowIndex}`,
                     values: [[formattedDate]]
                 });
                 updateBatch.push({
-                    range: `'${SHEET_WARGA_ALL}'!${colConfig.nomCol}${rowIndex}`,
+                    range: `'${WARGA_SHEET}'!${colConfig.nomCol}${rowIndex}`,
                     values: [[NOMINAL_IURAN_PER_BULAN]]
                 });
             }
             historyRows.push([dateLogStr, houseDisplayInSheet, monthName, NOMINAL_IURAN_PER_BULAN, senderNumber, "MANUAL_INPUT", "LUNAS"]);
         });
 
+        // Eksekusi jika ada bulan yang perlu diperbarui
         if (updateBatch.length > 0) {
             await sheets.spreadsheets.values.batchUpdate({
                 spreadsheetId: SPREADSHEET_ID,
@@ -312,10 +270,11 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
                     resource: { values: historyRows }
                 });
             } catch (e) {
-                writeLog(`⚠️ Histori log skipped: ${e.message}`);
+                writeLog(`⚠️ Histori log error: ${e.message}`);
             }
         }
 
+        // Kalkulasi Lebih Bayar
         const requiredAmount = unpaidMonthsToProcess.length * NOMINAL_IURAN_PER_BULAN;
         const overpaymentAmount = nominal - requiredAmount;
 
@@ -423,21 +382,19 @@ async function initAndStart() {
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
-            // COMMAND !tunggakan / !cektagihan / !tagihan (Sheet: TAGIHAN 2RT)
+            // COMMAND !cektagihan
             // -----------------------------------------------------------------
-            if (cleanCmd.startsWith('cektagihan') || cleanCmd.startsWith('tunggakan') || cleanCmd.startsWith('tagihan')) {
-                const args = msgText
-                    .replace(/^[!.\s]*(cektagihan|tunggakan|tagihan)/i, '')
-                    .trim();
-
+            if (cleanCmd.startsWith('cektagihan')) {
+                const args = msgText.replace(/^!cektagihan/i, '').trim();
+                
                 if (!args) {
                     await sock.sendMessage(remoteJid, { 
-                        text: `⚠️ *Format Salah!*\n\nGunakan format:\n👉 *!tunggakan <No_Rumah>*\n\nContoh:\n\`!tunggakan CA 03-09\`\n\`!tunggakan CA1908\`` 
+                        text: `⚠️ *Format Salah!*\n\nGunakan format:\n👉 *!cektagihan <No_Rumah>*\n\nContoh:\n\`!cektagihan CA 03-09\`\n\`!cektagihan CA0309\`` 
                     }, { quoted: msg });
                     return;
                 }
 
-                await sock.sendMessage(remoteJid, { text: `⏳ *Memeriksa data tunggakan untuk ${args} pada Sheet ${SHEET_TUNGGAKAN}...*` }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: `⏳ *Memeriksa data tagihan untuk ${args}...*` }, { quoted: msg });
 
                 try {
                     const tagihan = await checkTagihanWarga(args);
@@ -445,21 +402,21 @@ async function initAndStart() {
                     if (tagihan.success) {
                         if (tagihan.totalMonths === 0) {
                             const resMsg = 
-`🎉 *INFORMASI TUNGGAKAN IPL (${SHEET_TUNGGAKAN})*
+`🎉 *INFORMASI TAGIHAN IPL*
 
 • Rumah: *${tagihan.houseNumber}*
 • Status: *LUNAS TOTAL (12 Bulan)*
 
-Seluruh iuran IPL tahun 2026 sudah terbayarkan. Tidak ada tunggakan. Terima kasih! 🙏`;
+Seluruh iuran IPL tahun 2026 sudah terbayarkan. Terima kasih atas ketaatan Anda! 🙏`;
                             await sock.sendMessage(remoteJid, { text: resMsg }, { quoted: msg });
                         } else {
                             const resMsg = 
-`📋 *INFORMASI TUNGGAKAN IPL 2026 (${SHEET_TUNGGAKAN})*
+`📋 *INFORMASI TAGIHAN IPL 2026*
 
 • Rumah: *${tagihan.houseNumber}*
-• Total Tunggakan: *${tagihan.totalMonths} Bulan*
+• Belum Dibayar: *${tagihan.totalMonths} Bulan*
 • Rincian Bulan: *${tagihan.unpaidMonths.join(', ')}*
-• Total Nominal: *Rp ${tagihan.totalAmount.toLocaleString('id-ID')}*
+• Total Tagihan: *Rp ${tagihan.totalAmount.toLocaleString('id-ID')}*
 
 ━━━━━━━━━━━━━━━━━━━━━━
 💳 Pembayaran dapat dilakukan via VA Mandiri (85485 + No Rumah + 0) dan lakukan konfirmasi setelah transfer. Terima kasih! 🙏`;
@@ -470,13 +427,13 @@ Seluruh iuran IPL tahun 2026 sudah terbayarkan. Tidak ada tunggakan. Terima kasi
                     }
                 } catch (e) {
                     writeLog(`❌ Cek Tagihan Error: ${e.message}`);
-                    await sock.sendMessage(remoteJid, { text: `⚠️ Gagal mengecek tunggakan: ${e.message}` }, { quoted: msg });
+                    await sock.sendMessage(remoteJid, { text: `⚠️ Gagal mengecek tagihan: ${e.message}` }, { quoted: msg });
                 }
                 return;
             }
 
             // -----------------------------------------------------------------
-            // FORMAT KONFIRMASI PEMBAYARAN: <No_Rumah> <Bulan> <Nominal> (Sheet: 2026 ALL)
+            // FORMAT KONFIRMASI PEMBAYARAN: <No_Rumah> <Bulan> <Nominal>
             // -----------------------------------------------------------------
             const paymentPattern = /^([A-Z0-9\/\-\s]{3,12})\s+([A-Za-z\s\-]+)\s+(\d[\d\.\,]*)$/i;
             const match = msgText.match(paymentPattern);
@@ -533,8 +490,10 @@ Seluruh iuran IPL tahun 2026 sudah terbayarkan. Tidak ada tunggakan. Terima kasi
                 return;
             }
 
-            if (cleanCmd === 'konfirmasi' || cleanCmd === 'bayar' || cleanCmd === 'rekening') {
-                await sock.sendMessage(remoteJid, { text: getDefaultPaymentInfo() }, { quoted: msg });
+            if (cleanCmd === 'konfirmasi') {
+                await sock.sendMessage(remoteJid, { 
+                    text: `📝 *PETUNJUK KONFIRMASI PEMBAYARAN IPL*\n\nFormat Teks:\n👉 *<No_Rumah> <Bulan> <Nominal>*\n\nContoh:\n\`CA 03-01 Juni 210000\`\n\`CA1802 Januari-Desember 2520000\`` 
+                }, { quoted: msg });
             }
         });
 
