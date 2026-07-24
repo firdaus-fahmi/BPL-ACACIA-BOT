@@ -1,24 +1,18 @@
 require('dotenv').config();
 const express = require('express');
-const { default: makeWASocket, useMultiFileAuthState, delay, downloadMediaMessage, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { default: makeWASocket, useMultiFileAuthState, delay, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { google } = require('googleapis');
 const cron = require('node-cron');
 const pino = require('pino');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const retry = require('async-retry');
 
-// Fix Universal Import untuk p-queue (Mendukung CommonJS & ESM)
-const PQueueModule = require('p-queue');
-const PQueue = PQueueModule.default || PQueueModule;
-
 // =========================================================================
-// 1. VALIDASI ENVIRONMENT VARIABLES
+// 1. VALIDASI ENVIRONMENT VARIABLES & KONSTANTA
 // =========================================================================
-const requiredEnv = ["GEMINI_API_KEY", "SPREADSHEET_ID", "BOT_NUMBER", "ADMIN_NUMBERS"];
+const requiredEnv = ["SPREADSHEET_ID", "BOT_NUMBER", "ADMIN_NUMBERS"];
 const missingEnv = requiredEnv.filter(env => !process.env[env]);
 
 if (missingEnv.length > 0) {
@@ -26,7 +20,6 @@ if (missingEnv.length > 0) {
     process.exit(1);
 }
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const BOT_NUMBER = process.env.BOT_NUMBER;
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().replace(/[^0-9]/g, ''));
@@ -35,12 +28,11 @@ const WARGA_SHEET = process.env.WARGA_SHEET || 'TAGIHAN 2RT 19072026';
 const SETTING_SHEET = process.env.SETTING_SHEET || 'Setting';
 const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
 
+const NOMINAL_IURAN_PER_BULAN = 210000; // Standard nominal IPL per bulan
 let isConnectedToWA = false;
-const ocrQueueInstance = new PQueue({ concurrency: 1 });
-const activeHouseLocks = new Set();
 
 // =========================================================================
-// 2. PERSISTENCE DATABASE (SQLITE WITH WAL MODE) & LOGGING
+// 2. PERSISTENCE DATABASE (SQLITE) & LOGGING
 // =========================================================================
 const logDir = path.join(__dirname, 'logs');
 if (!fs.existsSync(logDir)) fs.mkdirSync(logDir);
@@ -57,41 +49,9 @@ const db = new Database(path.join(__dirname, 'bot_data.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 
-db.exec(`
-    CREATE TABLE IF NOT EXISTS processed_hashes (
-        hash TEXT PRIMARY KEY,
-        processed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS user_cooldowns (
-        sender_id TEXT PRIMARY KEY,
-        last_upload INTEGER
-    );
-`);
-
-cron.schedule('0 3 * * *', () => {
-    db.prepare("DELETE FROM processed_hashes WHERE processed_at < datetime('now', '-30 days')").run();
-    writeLog("🧹 Housekeeping: Cleaned old hash entries from SQLite.");
-});
-
-function performDatabaseBackup() {
-    try {
-        db.pragma('wal_checkpoint(TRUNCATE)');
-        const backupPath = path.join(__dirname, 'logs', `backup-db-${new Date().toISOString().split('T')[0]}.db`);
-        fs.copyFileSync(path.join(__dirname, 'bot_data.db'), backupPath);
-        writeLog("💾 Local SQLite Backup Completed Successfully.");
-    } catch (err) {
-        writeLog(`❌ Backup Failed: ${err.message}`);
-    }
-}
-cron.schedule('0 2 * * *', performDatabaseBackup);
-
 // =========================================================================
 // 3. GOOGLE API & RETRY MECHANISM
 // =========================================================================
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const geminiModelName = process.env.GEMINI_MODEL || "gemini-2.0-flash";
-const model = genAI.getGenerativeModel({ model: geminiModelName });
-
 const credentialsPath = path.join(__dirname, 'credentials.json');
 const auth = new google.auth.GoogleAuth({
     keyFile: credentialsPath,
@@ -112,11 +72,7 @@ async function fetchSheetsWithRetry(fn) {
             writeLog(`⚠️ Google API Error (${err.message}). Retrying...`);
             throw err;
         }
-    }, {
-        retries: 4,
-        minTimeout: 1000,
-        factor: 2
-    });
+    }, { retries: 4, minTimeout: 1000, factor: 2 });
 }
 
 // =========================================================================
@@ -128,28 +84,6 @@ function normalizeHouseNumber(raw) {
     const match = clean.match(/^([A-Z]+)(\d{2})(\d{2})$/);
     if (match) return `${match[1]} ${match[2]}-${match[3]}`;
     return raw.toUpperCase().trim();
-}
-
-function validateOCRData(data, rawText) {
-    if (!data || !data.no_rumah || !data.nominal) {
-        return { valid: false, reason: "Data nomor rumah atau nominal tidak terdeteksi" };
-    }
-
-    const normHouse = normalizeHouseNumber(data.no_rumah);
-    const isValidHousePattern = /^[A-Z]+\s?\d{2}-\d{2}$|^[A-Z0-9\/\-]{3,10}$/.test(normHouse);
-    if (!isValidHousePattern) {
-        return { valid: false, reason: "Format nomor rumah tidak valid" };
-    }
-
-    const upperRaw = rawText.toUpperCase();
-    const keywords = ["TRANSFER", "BERHASIL", "SUKSES", "BCA", "MANDIRI", "BRI", "BNI", "SELESAI", "TOTAL", "PAYMENT", "VA", "AKUN"];
-    const hasKeyword = keywords.some(kw => upperRaw.includes(kw));
-
-    if (!hasKeyword) {
-        return { valid: false, reason: "Struk tidak memiliki kata kunci transaksi valid" };
-    }
-
-    return { valid: true, normalizedHouse: normHouse };
 }
 
 async function getRekeningInfoFromSheets() {
@@ -171,35 +105,19 @@ async function getRekeningInfoFromSheets() {
 Silakan melakukan pembayaran melalui salah satu metode berikut:
 
 *1️⃣ Transfer Bank*
-
 🏦 Bank : ${config.BANK}
 👤 A/N : ${config.ACCOUNT_NAME || 'Pengurus RT'}
-💳 No. Rekening :
-${config.ACCOUNT_NUMBER}
+💳 No. Rekening : ${config.ACCOUNT_NUMBER}
 
 ━━━━━━━━━━━━━━━━━━━━━━
 
 *2️⃣ Virtual Account (VA)*
-
 Bank ${config.BANK} Virtual Account
-
-Format VA:
-${config.VA_PREFIX || '85485'} + Nomor Rumah + 0
-
-Contoh:
-• Rumah A01 → ${config.VA_PREFIX || '85485'}A010
-• Rumah B12 → ${config.VA_PREFIX || '85485'}B120
-• Rumah C105 → ${config.VA_PREFIX || '85485'}C1050
+Format VA: ${config.VA_PREFIX || '85485'} + Nomor Rumah + 0
 
 ━━━━━━━━━━━━━━━━━━━━━━
 
-📌 Setelah melakukan pembayaran, mohon kirim bukti transfer dengan mengetik:
-
-*.konfirmasi*
-
-atau kirim foto bukti transfer ke bot.
-
-Terima kasih 🙏`;
+📌 Setelah melakukan pembayaran, ketik *!konfirmasi* untuk petunjuk input pembayaran.`;
     } catch (err) {
         return null;
     }
@@ -217,10 +135,8 @@ async function getPenunggakFromSheets() {
         return rows
             .map(row => {
                 if (!row || row.length === 0) return null;
-
                 const noRumahVal = row[2] ? row[2].toString().trim() : "";
                 const namaVal = row[3] ? row[3].toString().trim() : "Warga";
-                
                 const rawNominal = row[9] || "0";
                 const cleanNominalStr = rawNominal.toString().replace(/[^0-9]/g, '');
                 const parsedNominal = parseInt(cleanNominalStr, 10);
@@ -228,17 +144,14 @@ async function getPenunggakFromSheets() {
 
                 if (!noRumahVal || totalNominal <= 0) return null;
 
-                return {
-                    no_rumah: noRumahVal,
-                    nama: namaVal,
-                    total_tunggakan: totalNominal
-                };
+                return { no_rumah: noRumahVal, nama: namaVal, total_tunggakan: totalNominal };
             })
             .filter(item => item !== null);
     });
 }
 
-async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGeminiText) {
+// Fungsi Otomatis Memecah Pembayaran Multi-Bulan ke Google Sheets
+async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
@@ -260,15 +173,17 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
             }
         }
 
-        if (rowIndex === -1) return { success: false, reason: "NOT_FOUND" };
+        if (rowIndex === -1) return { success: false, reason: "Rumah tidak ditemukan di database Google Sheets." };
 
-        let newStatus = "LUNAS";
-        let newSisa = 0;
+        // Hitung perkiraan berapa bulan yang dibayar
+        const totalBulanDibayar = Math.floor(nominal / NOMINAL_IURAN_PER_BULAN) || 1;
+        const nominalPerBulan = Math.floor(nominal / totalBulanDibayar);
 
-        if (nominal < currentSisaTagihan) {
-            newSisa = currentSisaTagihan - nominal;
-            newStatus = `SEBAGIAN (Sisa Rp ${newSisa.toLocaleString('id-ID')})`;
-        }
+        // Update sisa tagihan di Sheet WARGA
+        let newSisa = currentSisaTagihan - nominal;
+        if (newSisa < 0) newSisa = 0;
+
+        let statusText = newSisa === 0 ? "LUNAS" : `SEBAGIAN (Sisa Rp ${newSisa.toLocaleString('id-ID')})`;
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: SPREADSHEET_ID,
@@ -277,34 +192,45 @@ async function processPaymentAndLog(noRumah, nominal, sender, imageHash, rawGemi
             resource: { values: [[newSisa]] },
         });
 
+        // Simpan Log ke Sheet HISTORI (Auto-Split jika bayar multi-bulan)
         const dateStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+        const historyRows = [];
+
+        if (totalBulanDibayar > 1 && bulanText.includes('-')) {
+            const listBulan = bulanText.split('-').map(b => b.trim());
+            for (let b = 0; b < totalBulanDibayar; b++) {
+                const labelBulan = listBulan[b] || `${bulanText} (Bagian ${b + 1})`;
+                historyRows.push([dateStr, targetNorm, labelBulan, nominalPerBulan, senderNumber, "MANUAL_INPUT", statusText]);
+            }
+        } else {
+            historyRows.push([dateStr, targetNorm, bulanText, nominal, senderNumber, "MANUAL_INPUT", statusText]);
+        }
+
         await sheets.spreadsheets.values.append({
             spreadsheetId: SPREADSHEET_ID,
             range: `'${HISTORI_SHEET}'!A:G`,
             valueInputOption: 'USER_ENTERED',
-            resource: {
-                values: [[dateStr, targetNorm, nominal, sender, imageHash, newStatus, rawGeminiText.substring(0, 300)]]
-            }
+            resource: { values: historyRows }
         });
 
-        writeLog(`✅ Audit Log Executed: ${targetNorm} paid Rp ${nominal}`);
-        return { success: true, status: newStatus, sisa: newSisa };
+        writeLog(`✅ Manual Payment Logged: ${targetNorm} | ${bulanText} | Total: Rp ${nominal} (${totalBulanDibayar} Bulan)`);
+        return { 
+            success: true, 
+            normalizedHouse: targetNorm, 
+            status: statusText, 
+            totalBulan: totalBulanDibayar,
+            sisaTagihan: newSisa
+        };
     });
 }
 
 // =========================================================================
-// 5. SERVER EXPRESS
+// 5. SERVER EXPRESS (HEALTH CHECK)
 // =========================================================================
 const app = express();
 app.get('/', (req, res) => res.send('🤖 Bot WhatsApp Cluster Acacia Active!'));
 app.get('/health', (req, res) => {
-    res.json({
-        status: "ok",
-        uptime: process.uptime(),
-        connected: isConnectedToWA,
-        queueLength: ocrQueueInstance.size,
-        timestamp: new Date().toISOString()
-    });
+    res.json({ status: "ok", uptime: process.uptime(), connected: isConnectedToWA });
 });
 app.listen(process.env.PORT || 10000);
 
@@ -328,8 +254,6 @@ async function initAndStart() {
         }
 
         const { version, isLatest } = await fetchLatestBaileysVersion();
-        writeLog(`🔄 Menggunakan Baileys v${version.join('.')}` + (isLatest ? ' (Terbaru)' : ''));
-
         const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
         sock = makeWASocket({
@@ -351,20 +275,18 @@ async function initAndStart() {
                 const statusCode = (lastDisconnect?.error)?.output?.statusCode;
                 const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-                writeLog(`⚠️ Koneksi terputus (Status Code: ${statusCode || 'Unknown'}). Reconnect: ${shouldReconnect}`);
-
                 if (shouldReconnect) {
                     await delay(5000);
                     isReconnecting = false;
                     initAndStart();
                 } else {
-                    writeLog("❌ Session Logged Out/Expired. Silakan hapus folder 'auth_info_baileys' dan jalankan ulang.");
+                    writeLog("❌ Session Logged Out/Expired.");
                     isReconnecting = false;
                 }
             } else if (connection === 'open') {
                 isConnectedToWA = true;
                 isReconnecting = false;
-                writeLog("✅ BOT ENTERPRISE BERHASIL TERHUBUNG SEPENUHNYA!");
+                writeLog("✅ BOT ENTERPRISE BERHASIL TERHUBUNG!");
             }
         });
 
@@ -394,199 +316,113 @@ async function initAndStart() {
             const msgText = (
                 msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
-                msg.message.imageMessage?.caption ||
                 ''
             ).trim();
 
-            if (remoteJid === 'status@broadcast') return;
+            if (remoteJid === 'status@broadcast' || !msgText) return;
 
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
-            // A. OCR ENGINE (Membaca Gambar Bukti Transfer + Retry Fallback)
+            // 1. COMMAND !konfirmasi
             // -----------------------------------------------------------------
-            const isImage = msg.message.imageMessage || msg.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
+            if (cleanCmd === 'konfirmasi') {
+                const pendaftaranText = 
+`📝 *PETUNJUK KONFIRMASI PEMBAYARAN IPL*
 
-            if (isImage) {
-                const now = Date.now();
-                const coolRow = db.prepare("SELECT last_upload FROM user_cooldowns WHERE sender_id = ?").get(senderJid);
-                if (coolRow && (now - coolRow.last_upload < 10000)) {
-                    await sock.sendMessage(remoteJid, { text: "⏳ Mohon tunggu 10 detik sebelum mengunggah bukti berikutnya." }, { quoted: msg });
-                    return;
-                }
-                db.prepare("INSERT OR REPLACE INTO user_cooldowns (sender_id, last_upload) VALUES (?, ?)").run(senderJid, now);
+Silakan kirimkan pesan dengan format berikut:
 
-                await sock.sendMessage(remoteJid, { text: "🔎 *Bukti transfer diterima!* Sedang diverifikasi oleh AI..." }, { quoted: msg });
+*<No_Rumah> <Bulan> <Total_Nominal>*
 
-                ocrQueueInstance.add(async () => {
-                    try {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                        const imageHash = crypto.createHash('sha256').update(buffer).digest('hex');
+📌 *Contoh Pembayaran 1 Bulan:*
+\`CA0101 Juni 210000\`
 
-                        const dupCheck = db.prepare("SELECT hash FROM processed_hashes WHERE hash = ?").get(imageHash);
-                        if (dupCheck) {
-                            await sock.sendMessage(remoteJid, { text: "⚠️ Bukti transfer ini sudah pernah diproses sebelumnya!" }, { quoted: msg });
-                            return;
-                        }
+📌 *Contoh Pembayaran Multi-Bulan:*
+\`CA0101 Juni-Juli 420000\`
+\`CA0101 Mei-Juli 630000\`
 
-                        const mimeType = msg.message.imageMessage?.mimetype || 'image/jpeg';
-                        const prompt = `Ekstrak data dari struk ini. Balas HANYA JSON valid tanpa teks lain: {"no_rumah": "CA 09-03", "nominal": 210000}. Jika tidak ada set null.`;
+*Catatan:*
+• Iuran per bulan: *Rp 210.000*
+• Pembayaran multi-bulan akan otomatis dipisah pada laporan spreadsheet.`;
 
-                        // Panggilan AI dengan Retry & Model Fallback Terbaru
-                        let result;
-                        try {
-                            result = await model.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
-                        } catch (apiErr) {
-                            if (apiErr.message && (apiErr.message.includes('429') || apiErr.message.includes('Quota'))) {
-                                writeLog('⚠️ Kena Limit 429. Menunggu 3 detik lalu berpindah ke model fallback gemini-2.0-flash-lite...');
-                                await delay(3000); // Tunggu 3 detik agar rate limit reset
-                                
-                                try {
-                                    const fallbackModel = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
-                                    result = await fallbackModel.generateContent([prompt, { inlineData: { data: buffer.toString("base64"), mimeType } }]);
-                                } catch (fallbackErr) {
-                                    throw new Error("Sistem AI sedang padat (Quota Exceeded). Silakan coba kirim ulang gambar 1 menit lagi.");
-                                }
-                            } else {
-                                throw apiErr;
-                            }
-                        }
-
-                        const rawGeminiText = result.response.text();
-
-                        const cleanJsonText = rawGeminiText.replace(/```json/gi, '').replace(/```/g, '').trim();
-                        const jsonMatch = cleanJsonText.match(/\{[\s\S]*\}/);
-
-                        if (!jsonMatch) throw new Error("AI tidak menemukan format JSON valid dari gambar ini");
-                        const data = JSON.parse(jsonMatch[0]);
-
-                        const ocrVal = validateOCRData(data, cleanJsonText);
-                        if (!ocrVal.valid) {
-                            await sock.sendMessage(remoteJid, { text: `⚠️ Foto tidak memenuhi syarat konfirmasi otomatis (${ocrVal.reason}). Kirimkan foto yang lebih jelas.` }, { quoted: msg });
-                            return;
-                        }
-
-                        const targetNorm = ocrVal.normalizedHouse;
-
-                        if (activeHouseLocks.has(targetNorm)) {
-                            await sock.sendMessage(remoteJid, { text: `⏳ Pembayaran untuk rumah ${targetNorm} sedang diproses. Mohon tunggu sebentar.` }, { quoted: msg });
-                            return;
-                        }
-
-                        activeHouseLocks.add(targetNorm);
-
-                        try {
-                            if (data.nominal < 10000 || data.nominal > 20000000) {
-                                await sock.sendMessage(remoteJid, { text: `⚠️ Nominal Rp ${data.nominal.toLocaleString('id-ID')} terdeteksi di luar batas wajar. Hubungi Bendahara.` }, { quoted: msg });
-                                return;
-                            }
-
-                            const updateRes = await processPaymentAndLog(targetNorm, data.nominal, senderNumber, imageHash, rawGeminiText);
-
-                            if (updateRes.success) {
-                                db.prepare("INSERT INTO processed_hashes (hash) VALUES (?)").run(imageHash);
-                                let replyText = `✅ *PEMBAYARAN IPL TERKONFIRMASI*\n\n• No. Rumah: *${targetNorm}*\n• Nominal Masuk: *Rp ${data.nominal.toLocaleString('id-ID')}*\n• Status Tagihan: *${updateRes.status}*`;
-                                await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
-                            } else {
-                                await sock.sendMessage(remoteJid, { text: `❌ Nomor rumah *${targetNorm}* tidak ditemukan di data Google Sheets!` }, { quoted: msg });
-                            }
-                        } finally {
-                            activeHouseLocks.delete(targetNorm);
-                        }
-
-                    } catch (err) {
-                        writeLog(`❌ OCR Processing Error: ${err.message}`);
-                        await sock.sendMessage(remoteJid, { text: `⚠️ Gagal memproses gambar: ${err.message}. Pastikan gambar yang dikirim jelas.` }, { quoted: msg });
-                    }
-                });
+                await sock.sendMessage(remoteJid, { text: pendaftaranText }, { quoted: msg });
+                return;
             }
 
             // -----------------------------------------------------------------
-            // B. COMMAND HANDLERS (Teks Pesan)
+            // 2. DETEKSI FORMAT PEMBAYARAN TEKS (Misal: CA0101 Juni-Juli 420000)
             // -----------------------------------------------------------------
-            const isAdmin = ADMIN_NUMBERS.includes(senderNumber);
+            // Regex Mencocokkan: [NoRumah] [Bulan/RentangBulan] [Nominal]
+            const paymentPattern = /^([A-Z0-9\/\-]{3,10})\s+([A-Za-z\s\-]+)\s+(\d[\d\.\,]*)$/i;
+            const match = msgText.match(paymentPattern);
 
-            if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
-                let replyText = await getRekeningInfoFromSheets();
+            if (match) {
+                const rawNoRumah = match[1].trim();
+                const bulanText = match[2].trim();
+                const rawNominal = match[3].replace(/[^0-9]/g, '');
+                const nominal = parseInt(rawNominal, 10);
 
-                if (!replyText) {
-                    replyText = 
-`🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
-
-Silakan melakukan pembayaran melalui salah satu metode berikut:
-
-*1️⃣ Transfer Bank*
-
-🏦 Bank : Mandiri
-👤 A/N : GALUH SUGIYANTI
-💳 No. Rekening :
-1840006586760
-
-━━━━━━━━━━━━━━━━━━━━━━
-
-*2️⃣ Virtual Account (VA)*
-
-Bank Mandiri Virtual Account
-
-Format VA:
-85485 + Nomor Rumah + 0
-
-Contoh:
-• Rumah A01 → 85485A010
-• Rumah B12 → 85485B120
-• Rumah C105 → 85485C1050
-
-━━━━━━━━━━━━━━━━━━━━━━
-
-📌 Setelah melakukan pembayaran, mohon kirim bukti transfer dengan mengetik:
-
-*.konfirmasi*
-
-atau kirim foto bukti transfer ke bot.
-
-Terima kasih 🙏`;
+                if (isNaN(nominal) || nominal < 10000) {
+                    await sock.sendMessage(remoteJid, { text: "⚠️ Nominal pembayaran tidak valid!" }, { quoted: msg });
+                    return;
                 }
 
+                await sock.sendMessage(remoteJid, { text: "⏳ *Sedang memproses konfirmasi pembayaran...*" }, { quoted: msg });
+
+                try {
+                    const result = await processManualPayment(rawNoRumah, bulanText, nominal, senderNumber);
+
+                    if (result.success) {
+                        const replyMsg = 
+`✅ *PEMBAYARAN DITERIMA & DICATAT*
+
+• No. Rumah: *${result.normalizedHouse}*
+• Pembayaran Bulan: *${bulanText}* (${result.totalBulan} Bulan)
+• Total Masuk: *Rp ${nominal.toLocaleString('id-ID')}*
+• Status Tagihan: *${result.status}*
+
+_Data telah otomatis diperbarui di Google Sheets._ Terima kasih! 🙏`;
+
+                        await sock.sendMessage(remoteJid, { text: replyMsg }, { quoted: msg });
+                    } else {
+                        await sock.sendMessage(remoteJid, { text: `❌ Gagal: ${result.reason}` }, { quoted: msg });
+                    }
+                } catch (err) {
+                    writeLog(`❌ Error Process Payment: ${err.message}`);
+                    await sock.sendMessage(remoteJid, { text: `⚠️ Terjadi kesalahan saat mencatat ke Spreadsheet: ${err.message}` }, { quoted: msg });
+                }
+                return;
+            }
+
+            // -----------------------------------------------------------------
+            // 3. COMMAND UMUM LAINNYA
+            // -----------------------------------------------------------------
+            if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
+                let replyText = await getRekeningInfoFromSheets();
+                if (!replyText) {
+                    replyText = "🏦 *PEMBAYARAN IPL*\nTransfer ke Mandiri 1840006586760 a/n GALUH SUGIYANTI.\nKetik *!konfirmasi* setelah bayar.";
+                }
                 await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
             } 
             else if (cleanCmd === 'tunggakan' || cleanCmd === 'cek') {
                 try {
-                    writeLog(`🔍 Memproses command !tunggakan dari ${senderNumber}`);
                     const penunggak = await getPenunggakFromSheets();
-                    
                     if (!penunggak || penunggak.length === 0) {
                         await sock.sendMessage(remoteJid, { text: "🎉 *LUNAS SEMUA!* Semua warga telah melunasi IPL." }, { quoted: msg });
                     } else {
                         let teks = `📊 *DAFTAR BELUM BAYAR IPL (${penunggak.length} Rumah)*\n\n`;
-                        
                         penunggak.forEach((w, i) => {
-                            const namaWarga = w.nama || "Warga";
-                            const noRumah = w.no_rumah || "-";
-                            const nominalFormatted = typeof w.total_tunggakan === 'number' 
-                                ? w.total_tunggakan.toLocaleString('id-ID') 
-                                : "0";
-
-                            teks += `${i + 1}. *${noRumah}* (${namaWarga}) - Rp ${nominalFormatted}\n`;
+                            const nominalFormatted = w.total_tunggakan.toLocaleString('id-ID');
+                            teks += `${i + 1}. *${w.no_rumah}* (${w.nama}) - Rp ${nominalFormatted}\n`;
                         });
-
                         await sock.sendMessage(remoteJid, { text: teks }, { quoted: msg });
                     }
                 } catch (err) {
-                    writeLog(`❌ ERROR COMMAND TUNGGAKAN: ${err.stack || err.message}`);
-                    await sock.sendMessage(remoteJid, { 
-                        text: `⚠️ Gagal membaca data tunggakan. Mohon pastikan file *credentials.json* ada di folder bot dan tab nama sheet *'${WARGA_SHEET}'* sudah sesuai.` 
-                    }, { quoted: msg });
+                    await sock.sendMessage(remoteJid, { text: `⚠️ Gagal membaca data tunggakan.` }, { quoted: msg });
                 }
             }
-            else if (cleanCmd === 'konfirmasi') {
-                await sock.sendMessage(remoteJid, { text: "📸 Silakan *kirimkan foto/gambar bukti transfer* ke chat ini. Bot akan secara otomatis membaca dan memproses konfirmasi pembayaran Anda." }, { quoted: msg });
-            }
-            else if (cleanCmd === 'status') {
-                if (!isAdmin) return;
-                await sock.sendMessage(remoteJid, { text: `🤖 *SYSTEM STATUS*\n• Connected: ${isConnectedToWA}\n• Queue Size: ${ocrQueueInstance.size}\n• Active Locks: ${activeHouseLocks.size}` }, { quoted: msg });
-            }
             else if (cleanCmd === 'menu' || cleanCmd === 'help') {
-                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah yang tersedia:\n• *.bayar* / *.rekening* : Informasi nomor rekening & VA\n• *.cek* / *.tunggakan* : Cek daftar tagihan warga\n• *.konfirmasi* : Panduan konfirmasi pembayaran\n• *Kirim Foto Struk* : Konfirmasi otomatis via AI` }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah:\n• *!bayar* : Info rekening\n• *!cek* : Cek tunggakan warga\n• *!konfirmasi* : Cara konfirmasi pembayaran\n• *Format Teks* : CA0101 Juni 210000` }, { quoted: msg });
             }
         });
 
@@ -597,29 +433,9 @@ Terima kasih 🙏`;
 }
 
 // -------------------------------------------------------------------------
-// C. GRACEFUL SHUTDOWN HANDLER
+// 7. SHUTDOWN HANDLER
 // -------------------------------------------------------------------------
-const handleShutdown = async (signal) => {
-    writeLog(`⚠️ Signal ${signal} diterima. Memulai Graceful Shutdown...`);
-    
-    ocrQueueInstance.clear();
-
-    if (sock) {
-        try { sock.end(undefined); } catch (e) {}
-    }
-
-    try {
-        db.pragma('wal_checkpoint(TRUNCATE)');
-        db.close();
-        writeLog("✅ SQLite Database closed cleanly.");
-    } catch (e) {
-        writeLog(`❌ Error closing DB: ${e.message}`);
-    }
-
-    process.exit(0);
-};
-
-process.on('SIGTERM', () => handleShutdown('SIGTERM'));
-process.on('SIGINT', () => handleShutdown('SIGINT'));
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
 
 initAndStart();
