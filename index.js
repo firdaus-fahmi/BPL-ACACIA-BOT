@@ -113,28 +113,23 @@ async function fetchSheetsWithRetry(fn) {
 // 4. HELPER & NORMALISASI NOMOR RUMAH
 // =========================================================================
 
-/**
- * Normalisasi nomor rumah agar CA1908, CA 1908, CA 19-08, CA 19/08, CA 19/8
- * Semuanya menghasilkan variasi yang seragam.
- */
 function normalizeHouseVariants(rawInput) {
     if (!rawInput) return [];
     let clean = rawInput.toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9]/g, '');
     
     const setVariants = new Set();
-    setVariants.add(clean); // Contoh: CA1908
+    setVariants.add(clean);
 
-    // Jika pola CA1908 (Blok CA + 4 Angka) -> Buat variasi CA 19/8, CA 19/08
     const match4Digits = clean.match(/^([A-Z]+)(\d{2})(\d{2})$/);
     if (match4Digits) {
         const prefix = match4Digits[1];
-        const num1 = parseInt(match4Digits[2], 10).toString(); // "19" -> 19
-        const num2 = parseInt(match4Digits[3], 10).toString(); // "08" -> 8
+        const num1 = parseInt(match4Digits[2], 10).toString();
+        const num2 = parseInt(match4Digits[3], 10).toString();
 
-        setVariants.add(`${prefix}${num1}/${num2}`);       // CA19/8
-        setVariants.add(`${prefix} ${num1}/${num2}`);      // CA 19/8
-        setVariants.add(`${prefix}${num1}/${match4Digits[3]}`);  // CA19/08
-        setVariants.add(`${prefix} ${num1}/${match4Digits[3]}`); // CA 19/08
+        setVariants.add(`${prefix}${num1}/${num2}`);
+        setVariants.add(`${prefix} ${num1}/${num2}`);
+        setVariants.add(`${prefix}${num1}/${match4Digits[3]}`);
+        setVariants.add(`${prefix} ${num1}/${match4Digits[3]}`);
     }
 
     return Array.from(setVariants);
@@ -196,30 +191,25 @@ async function checkTagihanWarga(noRumah) {
     return await fetchSheetsWithRetry(async () => {
         const variants = normalizeHouseVariants(noRumah);
 
-        // 1. CEK TERLEBIH DAHULU DI SHEET TUNGGAKAN (TUNGGAKAN 2RT)
         try {
             const resTunggakan = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
-                range: `'${TUNGGAKAN_SHEET}'!A4:J500`, // Mengambil sampai Kolom J
+                range: `'${TUNGGAKAN_SHEET}'!A4:J500`,
             });
 
             const rowsTunggakan = resTunggakan.data.values || [];
 
             for (let i = 0; i < rowsTunggakan.length; i++) {
-                const cellRumah = rowsTunggakan[i][2]; // Kolom C (No Rumah)
+                const cellRumah = rowsTunggakan[i][2];
                 
                 if (cellRumah && matchesHouse(cellRumah, variants)) {
                     const houseDisplay = cellRumah.toString().trim();
-                    const namaPemilik = rowsTunggakan[i][3] || '-'; // Kolom D (Nama Pemilik)
+                    const namaPemilik = rowsTunggakan[i][3] || '-';
                     
-                    // --- AMBIL TOTAL BELUM BAYAR (RUPIAH) DARI KOLOM J (INDEX 9) ---
                     const rawNominalJ = rowsTunggakan[i][9] || "0"; 
-                    
-                    // Separasi angka desimal ,00 jika ada agar tidak terbaca 00 ekstra
                     const cleanNominalStr = rawNominalJ.toString().split(',')[0].replace(/[^0-9]/g, '');
                     const totalTunggakanNominal = parseInt(cleanNominalStr, 10) || 0;
 
-                    // --- AMBIL JUMLAH BULAN DARI KOLOM G (INDEX 6) / ATAU HITUNG MANUAL ---
                     const rawBulanG = rowsTunggakan[i][6] || "0";
                     let totalBulanTunggakan = parseInt(rawBulanG.toString().replace(/[^0-9]/g, ''), 10);
 
@@ -241,7 +231,6 @@ async function checkTagihanWarga(noRumah) {
             writeLog(`⚠️ Gagal membaca Sheet Tunggakan: ${errTunggakan.message}`);
         }
 
-        // 2. JIKA TIDAK DITEMUKAN DI TUNGGAKAN, CEK DI SHEET REGULER (2026 ALL)
         const resWarga = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
             range: `'${WARGA_SHEET}'!A5:AB1000`,
@@ -292,7 +281,51 @@ async function checkTagihanWarga(noRumah) {
 }
 
 // -------------------------------------------------------------------------
-// FITUR 2: PROSES PEMBAYARAN MANUAL
+// FITUR BARU: DAFTAR HUTANG KHUSUS RT 3 (!hutang)
+// -------------------------------------------------------------------------
+async function getDaftarHutangRT3() {
+    return await fetchSheetsWithRetry(async () => {
+        const resTunggakan = await sheets.spreadsheets.values.get({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `'${TUNGGAKAN_SHEET}'!A4:J500`, // Kolom B=RT, Kolom C=No Rumah, Kolom D=Nama, Kolom J=Total Belum Bayar
+        });
+
+        const rows = resTunggakan.data.values || [];
+        const listTunggakan = [];
+
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i];
+            if (!row || row.length < 3) continue;
+
+            const rtValue = (row[1] || "").toString().trim().replace(/[^0-9]/g, ''); // Kolom B (RT)
+            
+            // Filter Khusus RT 3 (Atau format 03 / 3)
+            if (rtValue === "3" || rtValue === "03") {
+                const noRumah = (row[2] || "-").toString().trim();
+                const namaPemilik = (row[3] || "-").toString().trim();
+                
+                // Ambil Kolom J (Total Belum Bayar - Rp)
+                const rawNominalJ = row[9] || "0"; 
+                const cleanNominalStr = rawNominalJ.toString().split(',')[0].replace(/[^0-9]/g, '');
+                const totalTunggakanNominal = parseInt(cleanNominalStr, 10) || 0;
+
+                // Hanya ambil yang punya tunggakan nominal > 0
+                if (totalTunggakanNominal > 0) {
+                    listTunggakan.push({
+                        noRumah,
+                        namaPemilik,
+                        totalAmount: totalTunggakanNominal
+                    });
+                }
+            }
+        }
+
+        return listTunggakan;
+    });
+}
+
+// -------------------------------------------------------------------------
+// FITUR 3: PROSES PEMBAYARAN MANUAL
 // -------------------------------------------------------------------------
 async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
     return await fetchSheetsWithRetry(async () => {
@@ -509,6 +542,48 @@ async function initAndStart() {
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
+            // COMMAND !hutang (KHUSUS RT 03)
+            // -----------------------------------------------------------------
+            if (cleanCmd === 'hutang') {
+                await sock.sendMessage(remoteJid, { text: `⏳ *Memuat daftar tunggakan khusus RT 03...*` }, { quoted: msg });
+
+                try {
+                    const listHutang = await getDaftarHutangRT3();
+
+                    if (listHutang.length === 0) {
+                        await sock.sendMessage(remoteJid, { text: `🎉 *Luar Biasa!* Tidak ada daftar tunggakan iuran untuk warga RT 03.` }, { quoted: msg });
+                        return;
+                    }
+
+                    let messageText = `📌 *DAFTAR TUNGGAKAN IURAN WAKTU/IPL (KHUSUS RT 03)*\n\n`;
+                    let grandTotal = 0;
+
+                    listHutang.forEach((item, index) => {
+                        grandTotal += item.totalAmount;
+                        messageText += `${index + 1}. *${item.namaPemilik}* (${item.noRumah})\n`;
+                        messageText += `   └ Tagihan: *Rp ${item.totalAmount.toLocaleString('id-ID')}*\n\n`;
+                    });
+
+                    messageText += `━━━━━━━━━━━━━━━━━━━━━━\n`;
+                    messageText += `💰 *TOTAL TUNGGAKAN RT 03: Rp ${grandTotal.toLocaleString('id-ID')}*\n\n`;
+
+                    // Kalimat sentuhan nurani / sindiran sopan
+                    messageText += `*Himbauan Bersama:*\n`;
+                    messageText += `_Iuran lingkungan ini adalah amanah bersama demi kenyamanan, kebersihan, dan keamanan lingkungan tempat kita tinggal sehari-hari. Sangat diharapkan kesadaran Bapak/Ibu dalam daftar di atas untuk dapat segera melunasinya. Mohon diingat, fasilitas dan fasilitas lingkungan kita nikmati bersama, alangkah bijaknya jika kewajibannya pun kita tanggung bersama tanpa membiarkan tetangga lainnya berjuang sendiri tiap bulannya._ 🙏\n\n`;
+                    
+                    // Mention All di akhir
+                    messageText += `@all`;
+
+                    await sock.sendMessage(remoteJid, { text: messageText }, { quoted: msg });
+
+                } catch (e) {
+                    writeLog(`❌ Hutang Command Error: ${e.message}`);
+                    await sock.sendMessage(remoteJid, { text: `⚠️ Gagal mengambil daftar hutang: ${e.message}` }, { quoted: msg });
+                }
+                return;
+            }
+
+            // -----------------------------------------------------------------
             // COMMAND !cektagihan
             // -----------------------------------------------------------------
             if (cleanCmd.startsWith('cektagihan')) {
@@ -528,7 +603,6 @@ async function initAndStart() {
 
                     if (tagihan.success) {
                         if (tagihan.isTunggakan) {
-                            // RESPONS UNTUK DAFTAR TUNGGAKAN
                             const resMsg = 
 `📋 *INFORMASI TAGIHAN (TUNGGAKAN)*
 
