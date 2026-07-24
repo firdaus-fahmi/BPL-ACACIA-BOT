@@ -531,12 +531,40 @@ async function initAndStart() {
             const msgText = (
                 msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
+                msg.message.imageMessage?.caption || 
                 ''
             ).trim();
 
             if (remoteJid === 'status@broadcast' || !msgText) return;
 
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
+
+            // -----------------------------------------------------------------
+            // COMMAND !konfirmasi ATAU .konfirmasi
+            // -----------------------------------------------------------------
+            if (cleanCmd === 'konfirmasi') {
+                const konfirmasiText = 
+`📝 *CARA KONFIRMASI PEMBAYARAN IPL*
+
+Untuk melakukan konfirmasi pembayaran, silakan kirimkan pesan dengan format berikut:
+
+👉 *<No_Rumah> <Bulan> <Nominal>*
+
+*Contoh:*
+\`CA0309 Februari 210000\`
+\`CA1712 Januari-Maret 630000\`
+
+---
+💡 *Catatan:*
+• Pastikan format spasi sesuai contoh.
+• Bot akan secara otomatis mencatat pembayaran ke sistem dan memperbarui data tagihan Anda.
+• Jika Anda menyertakan foto bukti transfer, pastikan memasukkan format teks di atas pada *caption* foto.
+
+Terima kasih atas partisipasinya! 🙏`;
+
+                await sock.sendMessage(remoteJid, { text: konfirmasiText }, { quoted: msg });
+                return;
+            }
 
             // -----------------------------------------------------------------
             // COMMAND !rekening
