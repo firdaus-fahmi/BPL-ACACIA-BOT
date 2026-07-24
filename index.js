@@ -78,12 +78,35 @@ async function fetchSheetsWithRetry(fn) {
 // =========================================================================
 // 4. HELPER LOGIKA BISNIS & GOOGLE SHEETS
 // =========================================================================
+// Normalisasi super fleksibel (menghapus semua spasi & tanda baca)
 function normalizeHouseNumber(raw) {
     if (!raw) return "";
-    let clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    const match = clean.match(/^([A-Z]+)(\d{2})(\d{2})$/);
-    if (match) return `${match[1]} ${match[2]}-${match[3]}`;
-    return raw.toUpperCase().trim();
+    return raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+// Daftar urutan bulan untuk auto-generate rentang bulan
+const LIST_BULAN = [
+    "JANUARI", "FEBRUARI", "MARET", "APRIL", "MEI", "JUNI",
+    "JULI", "AGUSTUS", "SEPTEMBER", "OKTOBER", "NOVEMBER", "DESEMBER"
+];
+
+function generateMonthList(bulanText, totalBulan) {
+    if (!bulanText.includes('-')) return [bulanText];
+
+    const parts = bulanText.split('-').map(b => b.trim().toUpperCase());
+    const startIdx = LIST_BULAN.findIndex(b => parts[0].startsWith(b.substring(0, 3)));
+    const endIdx = LIST_BULAN.findIndex(b => parts[1].startsWith(b.substring(0, 3)));
+
+    if (startIdx !== -1 && endIdx !== -1 && startIdx <= endIdx) {
+        return LIST_BULAN.slice(startIdx, endIdx + 1);
+    }
+
+    // Fallback jika nama bulan tidak dikenali
+    const result = [];
+    for (let i = 1; i <= totalBulan; i++) {
+        result.push(`${bulanText} (Bulan Ke-${i})`);
+    }
+    return result;
 }
 
 function getDefaultPaymentInfo() {
@@ -122,7 +145,7 @@ Contoh (1 Bulan):
 \`CA1712 Juni 210000\`
 
 Contoh (Multi-Bulan):
-\`CA1712 Juni-Juli 420000\`
+\`CA1802 Januari-Desember 2520000\`
 
 Terima kasih 🙏`;
 }
@@ -207,21 +230,25 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         const rows = res.data.values || [];
         let rowIndex = -1;
         let currentSisaTagihan = 0;
-        const targetNorm = normalizeHouseNumber(noRumah);
+        let houseDisplayInSheet = noRumah.toUpperCase();
+        const targetClean = normalizeHouseNumber(noRumah);
 
         for (let i = 0; i < rows.length; i++) {
-            const currentHouse = rows[i][2] ? normalizeHouseNumber(rows[i][2]) : "";
-            if (currentHouse === targetNorm) {
+            const currentHouseClean = rows[i][2] ? normalizeHouseNumber(rows[i][2]) : "";
+            if (currentHouseClean === targetClean) {
                 rowIndex = i + 5;
+                houseDisplayInSheet = rows[i][2].toString().trim(); // Pakai teks asli dari sheet
                 const rawVal = rows[i][9] || "0";
                 currentSisaTagihan = parseInt(rawVal.toString().replace(/[^0-9]/g, ''), 10) || 0;
                 break;
             }
         }
 
-        if (rowIndex === -1) return { success: false, reason: "Rumah tidak ditemukan di database Google Sheets." };
+        if (rowIndex === -1) {
+            return { success: false, reason: `Rumah '${noRumah}' tidak ditemukan di kolom C Sheet '${WARGA_SHEET}'. Pastikan nomor rumah di Sheet cocok.` };
+        }
 
-        // Hitung perkiraan berapa bulan yang dibayar berdasarkan nominal
+        // Hitung berapa bulan yang dibayar berdasarkan nominal
         const totalBulanDibayar = Math.floor(nominal / NOMINAL_IURAN_PER_BULAN) || 1;
         const nominalPerBulan = Math.floor(nominal / totalBulanDibayar);
 
@@ -238,18 +265,14 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
             resource: { values: [[newSisa]] },
         });
 
-        // Simpan Log ke Sheet HISTORI (Auto-Split jika bayar multi-bulan)
+        // Simpan Log ke Sheet HISTORI (Auto-Split tiap bulan)
         const dateStr = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
         const historyRows = [];
+        const monthList = generateMonthList(bulanText, totalBulanDibayar);
 
-        if (totalBulanDibayar > 1 && bulanText.includes('-')) {
-            const listBulan = bulanText.split('-').map(b => b.trim());
-            for (let b = 0; b < totalBulanDibayar; b++) {
-                const labelBulan = listBulan[b] || `${bulanText} (Bagian ${b + 1})`;
-                historyRows.push([dateStr, targetNorm, labelBulan, nominalPerBulan, senderNumber, "MANUAL_INPUT", statusText]);
-            }
-        } else {
-            historyRows.push([dateStr, targetNorm, bulanText, nominal, senderNumber, "MANUAL_INPUT", statusText]);
+        for (let b = 0; b < totalBulanDibayar; b++) {
+            const labelBulan = monthList[b] || `${bulanText} (Bagian ${b + 1})`;
+            historyRows.push([dateStr, houseDisplayInSheet, labelBulan, nominalPerBulan, senderNumber, "MANUAL_INPUT", statusText]);
         }
 
         await sheets.spreadsheets.values.append({
@@ -259,10 +282,10 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
             resource: { values: historyRows }
         });
 
-        writeLog(`✅ Manual Payment Logged: ${targetNorm} | ${bulanText} | Total: Rp ${nominal} (${totalBulanDibayar} Bulan)`);
+        writeLog(`✅ Manual Payment Logged: ${houseDisplayInSheet} | ${bulanText} | Total: Rp ${nominal} (${totalBulanDibayar} Baris)`);
         return { 
             success: true, 
-            normalizedHouse: targetNorm, 
+            normalizedHouse: houseDisplayInSheet, 
             status: statusText, 
             totalBulan: totalBulanDibayar,
             sisaTagihan: newSisa
@@ -384,7 +407,7 @@ Silakan kirimkan pesan dengan format berikut:
 \`CA1712 Juni 210000\`
 
 📌 *Contoh Pembayaran Multi-Bulan:*
-\`CA1712 Juni-Juli 420000\`
+\`CA1802 Januari-Desember 2520000\`
 \`CA1712 Mei-Juli 630000\`
 
 *Catatan:*
@@ -396,7 +419,7 @@ Silakan kirimkan pesan dengan format berikut:
             }
 
             // -----------------------------------------------------------------
-            // 2. DETEKSI FORMAT PEMBAYARAN TEKS (Contoh: CA1712 Juni-Juli 420000)
+            // 2. DETEKSI FORMAT PEMBAYARAN TEKS (Contoh: CA1802 Januari-Desember 2520000)
             // -----------------------------------------------------------------
             const paymentPattern = /^([A-Z0-9\/\-]{3,10})\s+([A-Za-z\s\-]+)\s+(\d[\d\.\,]*)$/i;
             const match = msgText.match(paymentPattern);
@@ -430,7 +453,7 @@ _Data telah otomatis diperbarui di Google Sheets._ Terima kasih! 🙏`;
 
                         await sock.sendMessage(remoteJid, { text: replyMsg }, { quoted: msg });
                     } else {
-                        await sock.sendMessage(remoteJid, { text: `❌ Gagal: ${result.reason}` }, { quoted: msg });
+                        await sock.sendMessage(remoteJid, { text: `❌ ${result.reason}` }, { quoted: msg });
                     }
                 } catch (err) {
                     writeLog(`❌ Error Process Payment: ${err.message}`);
@@ -464,7 +487,7 @@ _Data telah otomatis diperbarui di Google Sheets._ Terima kasih! 🙏`;
                 }
             }
             else if (cleanCmd === 'menu' || cleanCmd === 'help') {
-                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah:\n• *!bayar* : Info Virtual Account Mandiri\n• *!cek* : Cek tunggakan warga\n• *!konfirmasi* : Cara konfirmasi pembayaran\n• *Format Teks* : CA1712 Juni 210000` }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah:\n• *!bayar* : Info Virtual Account Mandiri\n• *!cek* : Cek tunggakan warga\n• *!konfirmasi* : Cara konfirmasi pembayaran\n• *Format Teks* : CA1802 Januari-Desember 2520000` }, { quoted: msg });
             }
         });
 
