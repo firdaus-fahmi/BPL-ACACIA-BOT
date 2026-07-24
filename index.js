@@ -23,16 +23,15 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const BOT_NUMBER = process.env.BOT_NUMBER;
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().replace(/[^0-9]/g, ''));
 
-// Mengunci sheet ke "2026 ALL"
-const WARGA_SHEET = (process.env.WARGA_SHEET && process.env.WARGA_SHEET !== 'TAGIHAN 2RT 19072026') 
-    ? process.env.WARGA_SHEET 
-    : '2026 ALL';
-
+// Definisi Nama Sheet
+const SHEET_WARGA_ALL = '2026 ALL'; // Untuk update pembayaran & cross-check
+const SHEET_TUNGGAKAN = 'RT003';    // Khusus untuk pengecekan !tunggakan
 const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
+
 const NOMINAL_IURAN_PER_BULAN = 210000;
 let isConnectedToWA = false;
 
-// Mapping Kolom Google Sheets untuk Sheet "2026 ALL"
+// Mapping Kolom Google Sheets untuk Sheet (Jan s/d Des)
 // Kolom C: No Rumah (Index Array: 2)
 // Jan: E/F (Idx 4,5) | Feb: G/H (Idx 6,7) | Mar: I/J (Idx 8,9) ... dst.
 const MONTH_COLUMN_MAP = {
@@ -148,13 +147,13 @@ Terima kasih 🙏`;
 }
 
 // -------------------------------------------------------------------------
-// FITUR 1: CEK TUNGGAKAN / TAGIHAN
+// FITUR 1: CEK TUNGGAKAN / TAGIHAN (MENGGUNAKAN SHEET 'RT003')
 // -------------------------------------------------------------------------
 async function checkTagihanWarga(noRumah) {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!A5:AB1000`,
+            range: `'${SHEET_TUNGGAKAN}'!A5:AB1000`,
         });
 
         const rows = res.data.values || [];
@@ -173,7 +172,7 @@ async function checkTagihanWarga(noRumah) {
         }
 
         if (!foundRow) {
-            return { success: false, reason: `Nomor rumah '${noRumah}' tidak ditemukan di Sheet '${WARGA_SHEET}'.` };
+            return { success: false, reason: `Nomor rumah '${noRumah}' tidak ditemukan di Sheet '${SHEET_TUNGGAKAN}'.` };
         }
 
         const bulanUnpaid = [];
@@ -200,13 +199,13 @@ async function checkTagihanWarga(noRumah) {
 }
 
 // -------------------------------------------------------------------------
-// FITUR 2: PROSES PEMBAYARAN + DETEKSI OVERPAYMENT
+// FITUR 2: PROSES PEMBAYARAN + CROSS CHECK OVERPAYMENT (MENGGUNAKAN SHEET '2026 ALL')
 // -------------------------------------------------------------------------
 async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!A5:AB1000`,
+            range: `'${SHEET_WARGA_ALL}'!A5:AB1000`,
         });
 
         const rows = res.data.values || [];
@@ -229,7 +228,7 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         }
 
         if (rowIndex === -1) {
-            return { success: false, reason: `Rumah '${noRumah}' tidak ditemukan di Kolom C Sheet '${WARGA_SHEET}'.` };
+            return { success: false, reason: `Rumah '${noRumah}' tidak ditemukan di Kolom C Sheet '${SHEET_WARGA_ALL}'.` };
         }
 
         const totalBulanDibayar = Math.floor(nominal / NOMINAL_IURAN_PER_BULAN) || 1;
@@ -265,11 +264,11 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
             const colConfig = MONTH_COLUMN_MAP[monthName];
             if (colConfig) {
                 updateBatch.push({
-                    range: `'${WARGA_SHEET}'!${colConfig.tglCol}${rowIndex}`,
+                    range: `'${SHEET_WARGA_ALL}'!${colConfig.tglCol}${rowIndex}`,
                     values: [[formattedDate]]
                 });
                 updateBatch.push({
-                    range: `'${WARGA_SHEET}'!${colConfig.nomCol}${rowIndex}`,
+                    range: `'${SHEET_WARGA_ALL}'!${colConfig.nomCol}${rowIndex}`,
                     values: [[NOMINAL_IURAN_PER_BULAN]]
                 });
             }
@@ -404,7 +403,7 @@ async function initAndStart() {
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
-            // COMMAND !cektagihan / !tunggakan / !tagihan
+            // COMMAND !tunggakan / !cektagihan / !tagihan (Sheet: RT003)
             // -----------------------------------------------------------------
             if (cleanCmd.startsWith('cektagihan') || cleanCmd.startsWith('tunggakan') || cleanCmd.startsWith('tagihan')) {
                 const args = msgText
@@ -418,7 +417,7 @@ async function initAndStart() {
                     return;
                 }
 
-                await sock.sendMessage(remoteJid, { text: `⏳ *Memeriksa data tunggakan untuk ${args}...*` }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: `⏳ *Memeriksa data tunggakan untuk ${args} pada Sheet RT003...*` }, { quoted: msg });
 
                 try {
                     const tagihan = await checkTagihanWarga(args);
@@ -426,7 +425,7 @@ async function initAndStart() {
                     if (tagihan.success) {
                         if (tagihan.totalMonths === 0) {
                             const resMsg = 
-`🎉 *INFORMASI TUNGGAKAN IPL*
+`🎉 *INFORMASI TUNGGAKAN IPL (RT003)*
 
 • Rumah: *${tagihan.houseNumber}*
 • Status: *LUNAS TOTAL (12 Bulan)*
@@ -435,7 +434,7 @@ Seluruh iuran IPL tahun 2026 sudah terbayarkan. Tidak ada tunggakan. Terima kasi
                             await sock.sendMessage(remoteJid, { text: resMsg }, { quoted: msg });
                         } else {
                             const resMsg = 
-`📋 *INFORMASI TUNGGAKAN IPL 2026*
+`📋 *INFORMASI TUNGGAKAN IPL 2026 (RT003)*
 
 • Rumah: *${tagihan.houseNumber}*
 • Total Tunggakan: *${tagihan.totalMonths} Bulan*
@@ -457,7 +456,7 @@ Seluruh iuran IPL tahun 2026 sudah terbayarkan. Tidak ada tunggakan. Terima kasi
             }
 
             // -----------------------------------------------------------------
-            // FORMAT KONFIRMASI PEMBAYARAN: <No_Rumah> <Bulan> <Nominal>
+            // FORMAT KONFIRMASI PEMBAYARAN: <No_Rumah> <Bulan> <Nominal> (Sheet: 2026 ALL)
             // -----------------------------------------------------------------
             const paymentPattern = /^([A-Z0-9\/\-\s]{3,12})\s+([A-Za-z\s\-]+)\s+(\d[\d\.\,]*)$/i;
             const match = msgText.match(paymentPattern);
