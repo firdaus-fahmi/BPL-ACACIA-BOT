@@ -28,7 +28,7 @@ const WARGA_SHEET = process.env.WARGA_SHEET || 'TAGIHAN 2RT 19072026';
 const SETTING_SHEET = process.env.SETTING_SHEET || 'Setting';
 const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
 
-const NOMINAL_IURAN_PER_BULAN = 210000; // Standard nominal IPL per bulan
+const NOMINAL_IURAN_PER_BULAN = 210000; // Nominal standar IPL per bulan
 let isConnectedToWA = false;
 
 // =========================================================================
@@ -86,6 +86,47 @@ function normalizeHouseNumber(raw) {
     return raw.toUpperCase().trim();
 }
 
+function getDefaultPaymentInfo() {
+    return `🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
+
+Silakan melakukan pembayaran melalui salah satu metode berikut:
+
+💳 *Virtual Account (VA)*
+Bank Mandiri Virtual Account
+
+Format VA:
+85485 + Nomor Rumah + 0
+
+Contoh:
+• Rumah CA1712 → 8548517120
+• Rumah CA0203 → 8548502030
+• Rumah CA1810 → 8548518100
+
+━━━━━━━━━━━━━━━━━━━━━━
+📌 *Cara Pembayaran:*
+
+1. *Livin' by Mandiri:*
+   Pilih Bayar ➔ Cari "Balai Pengelola Lingkungan Acacia" atau nomor biller ➔ Masukkan Nomor VA ➔ Lanjut Bayar.
+
+2. *Bank Lain (Non-Mandiri):*
+   Pilih Transfer ➔ Bank Mandiri ➔ No. Rekening diisi Nomor VA ➔ Nominal sesuai tagihan (Rp 210.000) ➔ Submit ➔ Selesai.
+━━━━━━━━━━━━━━━━━━━━━━
+
+📌 *CARA KONFIRMASI PEMBAYARAN:*
+
+Setelah bayar, silakan ketik *!konfirmasi* untuk melihat petunjuk, ATAU langsung kirim pesan dengan format:
+
+👉 *<No_Rumah> <Bulan> <Nominal>*
+
+Contoh (1 Bulan):
+\`CA1712 Juni 210000\`
+
+Contoh (Multi-Bulan):
+\`CA1712 Juni-Juli 420000\`
+
+Terima kasih 🙏`;
+}
+
 async function getRekeningInfoFromSheets() {
     try {
         const res = await sheets.spreadsheets.values.get({
@@ -93,33 +134,38 @@ async function getRekeningInfoFromSheets() {
             range: `'${SETTING_SHEET}'!A2:B10`,
         });
         const rows = res.data.values || [];
-        if (rows.length === 0) return null;
+        if (rows.length === 0) return getDefaultPaymentInfo();
 
         const config = {};
         rows.forEach(r => { if (r[0] && r[1]) config[r[0].trim()] = r[1].trim(); });
         
-        if (!config.BANK || !config.ACCOUNT_NUMBER) return null;
+        if (!config.BANK || !config.ACCOUNT_NUMBER) return getDefaultPaymentInfo();
 
         return `🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
 
-Silakan melakukan pembayaran melalui salah satu metode berikut:
+Silakan melakukan pembayaran melalui metode berikut:
 
-*1️⃣ Transfer Bank*
-🏦 Bank : ${config.BANK}
-👤 A/N : ${config.ACCOUNT_NAME || 'Pengurus RT'}
-💳 No. Rekening : ${config.ACCOUNT_NUMBER}
-
-━━━━━━━━━━━━━━━━━━━━━━
-
-*2️⃣ Virtual Account (VA)*
+💳 *Virtual Account (VA)*
 Bank ${config.BANK} Virtual Account
-Format VA: ${config.VA_PREFIX || '85485'} + Nomor Rumah + 0
+
+Format VA:
+${config.VA_PREFIX || '85485'} + Nomor Rumah + 0
+
+Contoh:
+• Rumah CA1712 → ${config.VA_PREFIX || '85485'}17120
 
 ━━━━━━━━━━━━━━━━━━━━━━
+📌 *CARA KONFIRMASI PEMBAYARAN:*
 
-📌 Setelah melakukan pembayaran, ketik *!konfirmasi* untuk petunjuk input pembayaran.`;
+Setelah bayar, silakan ketik *!konfirmasi* atau kirim format teks:
+👉 *<No_Rumah> <Bulan> <Nominal>*
+
+Contoh:
+\`CA1712 Juni 210000\`
+
+Terima kasih 🙏`;
     } catch (err) {
-        return null;
+        return getDefaultPaymentInfo();
     }
 }
 
@@ -150,7 +196,7 @@ async function getPenunggakFromSheets() {
     });
 }
 
-// Fungsi Otomatis Memecah Pembayaran Multi-Bulan ke Google Sheets
+// Fungsi Memecah Pembayaran Multi-Bulan ke Google Sheets
 async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
@@ -175,7 +221,7 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
 
         if (rowIndex === -1) return { success: false, reason: "Rumah tidak ditemukan di database Google Sheets." };
 
-        // Hitung perkiraan berapa bulan yang dibayar
+        // Hitung perkiraan berapa bulan yang dibayar berdasarkan nominal
         const totalBulanDibayar = Math.floor(nominal / NOMINAL_IURAN_PER_BULAN) || 1;
         const nominalPerBulan = Math.floor(nominal / totalBulanDibayar);
 
@@ -253,7 +299,7 @@ async function initAndStart() {
             sock = null;
         }
 
-        const { version, isLatest } = await fetchLatestBaileysVersion();
+        const { version } = await fetchLatestBaileysVersion();
         const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
         sock = makeWASocket({
@@ -327,32 +373,31 @@ async function initAndStart() {
             // 1. COMMAND !konfirmasi
             // -----------------------------------------------------------------
             if (cleanCmd === 'konfirmasi') {
-                const pendaftaranText = 
+                const petunjukText = 
 `📝 *PETUNJUK KONFIRMASI PEMBAYARAN IPL*
 
 Silakan kirimkan pesan dengan format berikut:
 
-*<No_Rumah> <Bulan> <Total_Nominal>*
+👉 *<No_Rumah> <Bulan> <Total_Nominal>*
 
 📌 *Contoh Pembayaran 1 Bulan:*
-\`CA0101 Juni 210000\`
+\`CA1712 Juni 210000\`
 
 📌 *Contoh Pembayaran Multi-Bulan:*
-\`CA0101 Juni-Juli 420000\`
-\`CA0101 Mei-Juli 630000\`
+\`CA1712 Juni-Juli 420000\`
+\`CA1712 Mei-Juli 630000\`
 
 *Catatan:*
 • Iuran per bulan: *Rp 210.000*
-• Pembayaran multi-bulan akan otomatis dipisah pada laporan spreadsheet.`;
+• Pembayaran multi-bulan otomatis dipisah pada laporan spreadsheet.`;
 
-                await sock.sendMessage(remoteJid, { text: pendaftaranText }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: petunjukText }, { quoted: msg });
                 return;
             }
 
             // -----------------------------------------------------------------
-            // 2. DETEKSI FORMAT PEMBAYARAN TEKS (Misal: CA0101 Juni-Juli 420000)
+            // 2. DETEKSI FORMAT PEMBAYARAN TEKS (Contoh: CA1712 Juni-Juli 420000)
             // -----------------------------------------------------------------
-            // Regex Mencocokkan: [NoRumah] [Bulan/RentangBulan] [Nominal]
             const paymentPattern = /^([A-Z0-9\/\-]{3,10})\s+([A-Za-z\s\-]+)\s+(\d[\d\.\,]*)$/i;
             const match = msgText.match(paymentPattern);
 
@@ -398,10 +443,7 @@ _Data telah otomatis diperbarui di Google Sheets._ Terima kasih! 🙏`;
             // 3. COMMAND UMUM LAINNYA
             // -----------------------------------------------------------------
             if (cleanCmd === 'rekening' || cleanCmd === 'bayar') {
-                let replyText = await getRekeningInfoFromSheets();
-                if (!replyText) {
-                    replyText = "🏦 *PEMBAYARAN IPL*\nTransfer ke Mandiri 1840006586760 a/n GALUH SUGIYANTI.\nKetik *!konfirmasi* setelah bayar.";
-                }
+                const replyText = await getRekeningInfoFromSheets();
                 await sock.sendMessage(remoteJid, { text: replyText }, { quoted: msg });
             } 
             else if (cleanCmd === 'tunggakan' || cleanCmd === 'cek') {
@@ -422,7 +464,7 @@ _Data telah otomatis diperbarui di Google Sheets._ Terima kasih! 🙏`;
                 }
             }
             else if (cleanCmd === 'menu' || cleanCmd === 'help') {
-                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah:\n• *!bayar* : Info rekening\n• *!cek* : Cek tunggakan warga\n• *!konfirmasi* : Cara konfirmasi pembayaran\n• *Format Teks* : CA0101 Juni 210000` }, { quoted: msg });
+                await sock.sendMessage(remoteJid, { text: `🤖 *BOT KAS CLUSTER ACACIA*\n\nPerintah:\n• *!bayar* : Info Virtual Account Mandiri\n• *!cek* : Cek tunggakan warga\n• *!konfirmasi* : Cara konfirmasi pembayaran\n• *Format Teks* : CA1712 Juni 210000` }, { quoted: msg });
             }
         });
 
