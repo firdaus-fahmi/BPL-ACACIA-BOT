@@ -78,10 +78,21 @@ async function fetchSheetsWithRetry(fn) {
 // =========================================================================
 // 4. HELPER LOGIKA BISNIS & GOOGLE SHEETS
 // =========================================================================
-// Normalisasi super fleksibel (menghapus semua spasi & tanda baca)
+// Normalisasi Cerdas: Menyamakan CA1802, CA 18/02, CA 18-02, CA 18/2
 function normalizeHouseNumber(raw) {
     if (!raw) return "";
-    return raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    let clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    
+    // Ekstrak Huruf (misal CA), Blok, dan Nomor Rumah
+    const match = clean.match(/^([A-Z]+)(\d{1,2})(\d{2})$/);
+    if (match) {
+        const prefix = match[1];
+        const block = parseInt(match[2], 10);
+        const number = parseInt(match[3], 10);
+        return `${prefix}${block}_${number}`; // Contoh Output: CA18_2
+    }
+    
+    return clean;
 }
 
 // Daftar urutan bulan untuk auto-generate rentang bulan
@@ -101,7 +112,7 @@ function generateMonthList(bulanText, totalBulan) {
         return LIST_BULAN.slice(startIdx, endIdx + 1);
     }
 
-    // Fallback jika nama bulan tidak dikenali
+    // Fallback jika nama bulan tidak standar
     const result = [];
     for (let i = 1; i <= totalBulan; i++) {
         result.push(`${bulanText} (Bulan Ke-${i})`);
@@ -231,13 +242,21 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         let rowIndex = -1;
         let currentSisaTagihan = 0;
         let houseDisplayInSheet = noRumah.toUpperCase();
+        
         const targetClean = normalizeHouseNumber(noRumah);
+        const targetNumbersOnly = noRumah.replace(/[^0-9]/g, ''); // Contoh '1802'
 
         for (let i = 0; i < rows.length; i++) {
-            const currentHouseClean = rows[i][2] ? normalizeHouseNumber(rows[i][2]) : "";
-            if (currentHouseClean === targetClean) {
+            if (!rows[i] || !rows[i][2]) continue;
+            
+            const rawSheetHouse = rows[i][2].toString().trim();
+            const currentHouseClean = normalizeHouseNumber(rawSheetHouse);
+            const currentHouseNumbersOnly = rawSheetHouse.replace(/[^0-9]/g, '');
+
+            // Cocokkan via Smart Normalized ATAU via Digit Angka saja
+            if (currentHouseClean === targetClean || (targetNumbersOnly.length >= 3 && currentHouseNumbersOnly === targetNumbersOnly)) {
                 rowIndex = i + 5;
-                houseDisplayInSheet = rows[i][2].toString().trim(); // Pakai teks asli dari sheet
+                houseDisplayInSheet = rawSheetHouse; // Pakai format tulisan asli di Spreadsheet
                 const rawVal = rows[i][9] || "0";
                 currentSisaTagihan = parseInt(rawVal.toString().replace(/[^0-9]/g, ''), 10) || 0;
                 break;
