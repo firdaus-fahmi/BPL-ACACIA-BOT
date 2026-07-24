@@ -96,10 +96,17 @@ async function fetchSheetsWithRetry(fn) {
 }
 
 // =========================================================================
-// 4. HELPER & LOGIKA BISNIS
+// 4. HELPER & LOGIKA BISNIS (PERBAIKAN MATCHING RUMAH)
 // =========================================================================
-function extractDigits(raw) {
-    return raw ? raw.replace(/[^0-9]/g, '').replace(/^0+/, '') : "";
+
+// Membersihkan string menjadi hanya Karakter Alfanumerik Kapital (Misal: "CA 19-08" -> "CA1908")
+function normalizeHouseNumber(raw) {
+    return raw ? raw.toString().toUpperCase().replace(/[^A-Z0-9]/g, '') : "";
+}
+
+// Membersihkan hanya Angka tanpa membuang angka 0 (Misal: "CA 19-08" -> "1908")
+function extractDigitsStrict(raw) {
+    return raw ? raw.toString().replace(/[^0-9]/g, '') : "";
 }
 
 function generateMonthList(bulanText, totalBulan) {
@@ -138,6 +145,7 @@ Contoh:
 1️⃣ *Cek Tunggakan:*
    👉 \`!tunggakan <No_Rumah>\`
    Contoh: \`!tunggakan CA 03-09\`
+   Contoh: \`!tunggakan CA1908\`
 
 2️⃣ *Konfirmasi Pembayaran:*
    👉 \`<No_Rumah> <Bulan> <Nominal>\`
@@ -147,7 +155,7 @@ Terima kasih 🙏`;
 }
 
 // -------------------------------------------------------------------------
-// FITUR 1: CEK TUNGGAKAN / TAGIHAN (MENGGUNAKAN SHEET 'RT003')
+// FITUR 1: CEK TUNGGAKAN / TAGIHAN (SHEET 'RT003')
 // -------------------------------------------------------------------------
 async function checkTagihanWarga(noRumah) {
     return await fetchSheetsWithRetry(async () => {
@@ -157,16 +165,25 @@ async function checkTagihanWarga(noRumah) {
         });
 
         const rows = res.data.values || [];
-        const inputDigits = extractDigits(noRumah);
+        const normalizedInput = normalizeHouseNumber(noRumah);
+        const digitsInput = extractDigitsStrict(noRumah);
+
         let foundRow = null;
         let houseDisplayInSheet = noRumah.toUpperCase();
 
         for (let i = 0; i < rows.length; i++) {
             if (!rows[i] || !rows[i][2]) continue;
-            const sheetDigits = extractDigits(rows[i][2]);
-            if (inputDigits && sheetDigits && inputDigits === sheetDigits) {
+            
+            const sheetValue = rows[i][2].toString();
+            const normalizedSheet = normalizeHouseNumber(sheetValue);
+            const digitsSheet = extractDigitsStrict(sheetValue);
+
+            // Pencocokan 1: Alfanumerik persis (Misal: "CA1908" === "CA1908")
+            // Pencocokan 2: Angka persis (Misal: "1908" === "1908")
+            if ((normalizedInput && normalizedInput === normalizedSheet) || 
+                (digitsInput && digitsSheet && digitsInput === digitsSheet)) {
                 foundRow = rows[i];
-                houseDisplayInSheet = rows[i][2].toString().trim();
+                houseDisplayInSheet = sheetValue.trim();
                 break;
             }
         }
@@ -199,7 +216,7 @@ async function checkTagihanWarga(noRumah) {
 }
 
 // -------------------------------------------------------------------------
-// FITUR 2: PROSES PEMBAYARAN + CROSS CHECK OVERPAYMENT (MENGGUNAKAN SHEET '2026 ALL')
+// FITUR 2: PROSES PEMBAYARAN + CROSS CHECK OVERPAYMENT (SHEET '2026 ALL')
 // -------------------------------------------------------------------------
 async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
     return await fetchSheetsWithRetry(async () => {
@@ -213,15 +230,20 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         let houseDisplayInSheet = noRumah.toUpperCase();
         let targetRowData = null;
 
-        const inputDigits = extractDigits(noRumah);
+        const normalizedInput = normalizeHouseNumber(noRumah);
+        const digitsInput = extractDigitsStrict(noRumah);
 
         for (let i = 0; i < rows.length; i++) {
             if (!rows[i] || !rows[i][2]) continue;
-            const sheetDigits = extractDigits(rows[i][2]);
 
-            if (inputDigits && sheetDigits && inputDigits === sheetDigits) {
+            const sheetValue = rows[i][2].toString();
+            const normalizedSheet = normalizeHouseNumber(sheetValue);
+            const digitsSheet = extractDigitsStrict(sheetValue);
+
+            if ((normalizedInput && normalizedInput === normalizedSheet) || 
+                (digitsInput && digitsSheet && digitsInput === digitsSheet)) {
                 rowIndex = i + 5; 
-                houseDisplayInSheet = rows[i][2].toString().trim();
+                houseDisplayInSheet = sheetValue.trim();
                 targetRowData = rows[i];
                 break;
             }
@@ -412,7 +434,7 @@ async function initAndStart() {
 
                 if (!args) {
                     await sock.sendMessage(remoteJid, { 
-                        text: `⚠️ *Format Salah!*\n\nGunakan format:\n👉 *!tunggakan <No_Rumah>*\n\nContoh:\n\`!tunggakan CA 03-09\`\n\`!tunggakan CA0309\`` 
+                        text: `⚠️ *Format Salah!*\n\nGunakan format:\n👉 *!tunggakan <No_Rumah>*\n\nContoh:\n\`!tunggakan CA 03-09\`\n\`!tunggakan CA1908\`` 
                     }, { quoted: msg });
                     return;
                 }
