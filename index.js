@@ -23,16 +23,17 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const BOT_NUMBER = process.env.BOT_NUMBER;
 const ADMIN_NUMBERS = process.env.ADMIN_NUMBERS.split(',').map(n => n.trim().replace(/[^0-9]/g, ''));
 
-// Menggunakan Sheet "2026 ALL" sebagai default
-const WARGA_SHEET = process.env.WARGA_SHEET || '2026 ALL';
-const SETTING_SHEET = process.env.SETTING_SHEET || 'Setting';
-const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
+// Mengunci nama Sheet ke "2026 ALL" (mengabaikan kesalahan nama sheet di .env jika ada)
+const WARGA_SHEET = (process.env.WARGA_SHEET && process.env.WARGA_SHEET !== 'TAGIHAN 2RT 19072026') 
+    ? process.env.WARGA_SHEET 
+    : '2026 ALL';
 
+const HISTORI_SHEET = process.env.HISTORI_SHEET || 'HISTORI_PEMBAYARAN';
 const NOMINAL_IURAN_PER_BULAN = 210000;
 let isConnectedToWA = false;
 
-// Mapping Indeks Kolom Google Sheets untuk Sheet "2026 ALL"
-// Kolom A=0, B=1, C=2, D=3, E=4 (Jan Tgl), F=5 (Jan Nom), G=6 (Feb Tgl), H=7 (Feb Nom), dst.
+// Mapping Kolom Google Sheets untuk "2026 ALL"
+// Kolom A=0, B=1, C=2 (No Rumah), D=3 (Nama)
 const MONTH_COLUMN_MAP = {
     "JANUARI":   { tglCol: "E", nomCol: "F" },
     "FEBRUARI":  { tglCol: "G", nomCol: "H" },
@@ -97,17 +98,9 @@ async function fetchSheetsWithRetry(fn) {
 // =========================================================================
 // 4. HELPER & LOGIKA BISNIS
 // =========================================================================
-// Normalisasi Nomor Rumah pintar (Mencocokkan CA1802, CA 18-02, CA 18/02, dll)
-function normalizeHouseNumber(raw) {
-    if (!raw) return "";
-    let clean = raw.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    
-    // Ekstrak Awalan Teks (misal CA) dan Gabungan Angka
-    const match = clean.match(/^([A-Z]+)(\d+)$/);
-    if (match) {
-        return `${match[1]}_${parseInt(match[2], 10)}`;
-    }
-    return clean;
+// Pencocokan Nomor Rumah Sangat Fleksibel (CA1802 -> CA182 & 1802)
+function extractDigits(raw) {
+    return raw ? raw.replace(/[^0-9]/g, '').replace(/^0+/, '') : "";
 }
 
 function generateMonthList(bulanText, totalBulan) {
@@ -125,14 +118,13 @@ function generateMonthList(bulanText, totalBulan) {
         return LIST_BULAN.slice(startIdx, endIdx + 1);
     }
 
-    // Fallback jika tidak terdeteksi
     return LIST_BULAN.slice(0, totalBulan);
 }
 
 function getDefaultPaymentInfo() {
     return `🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
 
-Silakan melakukan pembayaran melalui metode Virtual Account berikut:
+Silakan melakukan pembayaran melalui Virtual Account berikut:
 
 💳 *Virtual Account (VA) Bank Mandiri*
 Format VA: 85485 + Nomor Rumah + 0
@@ -161,25 +153,23 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
     return await fetchSheetsWithRetry(async () => {
         const res = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${WARGA_SHEET}'!A5:AC1000`,
+            range: `'${WARGA_SHEET}'!A5:C1000`,
         });
 
         const rows = res.data.values || [];
         let rowIndex = -1;
         let houseDisplayInSheet = noRumah.toUpperCase();
         
-        const targetClean = normalizeHouseNumber(noRumah);
-        const targetDigits = noRumah.replace(/[^0-9]/g, '');
+        const inputDigits = extractDigits(noRumah);
 
-        // 1. Cari Baris Rumah di Kolom C
+        // 1. Cari Baris Rumah di Kolom C berdasarkan Digit Angka
         for (let i = 0; i < rows.length; i++) {
             if (!rows[i] || !rows[i][2]) continue;
             
             const rawSheetHouse = rows[i][2].toString().trim();
-            const currentClean = normalizeHouseNumber(rawSheetHouse);
-            const currentDigits = rawSheetHouse.replace(/[^0-9]/g, '');
+            const sheetDigits = extractDigits(rawSheetHouse);
 
-            if (currentClean === targetClean || (targetDigits.length >= 3 && currentDigits === targetDigits)) {
+            if (inputDigits && sheetDigits && inputDigits === sheetDigits) {
                 rowIndex = i + 5; // Karena data dimulai dari baris 5
                 houseDisplayInSheet = rawSheetHouse;
                 break;
@@ -187,10 +177,10 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
         }
 
         if (rowIndex === -1) {
-            return { success: false, reason: `Rumah '${noRumah}' tidak ditemukan di Kolom C Sheet '${WARGA_SHEET}'.` };
+            return { success: false, reason: `Rumah '${noRumah}' tidak ditemukan di Kolom C Sheet '${WARGA_SHEET}'. Pastikan nomor rumah cocok.` };
         }
 
-        // 2. Hitung Bulan & Tentukan Bulan yang Dibayar
+        // 2. Hitung Bulan
         const totalBulanDibayar = Math.floor(nominal / NOMINAL_IURAN_PER_BULAN) || 1;
         const targetMonths = generateMonthList(bulanText, totalBulanDibayar);
 
@@ -223,11 +213,10 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
                 });
             }
 
-            // Log untuk Histori
             historyRows.push([dateLogStr, houseDisplayInSheet, monthName, NOMINAL_IURAN_PER_BULAN, senderNumber, "MANUAL_INPUT", "LUNAS"]);
         }
 
-        // Jalankan Update Batch ke Sheet "2026 ALL"
+        // Batch Update ke Sheet "2026 ALL"
         await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
             resource: {
@@ -236,7 +225,7 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
             }
         });
 
-        // Simpan Log Transaksi ke Sheet HISTORI_PEMBAYARAN
+        // Log Histori Pembayaran
         try {
             await sheets.spreadsheets.values.append({
                 spreadsheetId: SPREADSHEET_ID,
@@ -245,7 +234,7 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
                 resource: { values: historyRows }
             });
         } catch (e) {
-            writeLog(`⚠️ Gagal catat histori (Abaikan jika tab Histori tidak ada): ${e.message}`);
+            writeLog(`⚠️ Histori Log skipped: ${e.message}`);
         }
 
         writeLog(`✅ Success Payment: ${houseDisplayInSheet} | ${targetMonths.join(', ')} | Total: Rp ${nominal}`);
@@ -261,10 +250,10 @@ async function processManualPayment(noRumah, bulanText, nominal, senderNumber) {
 }
 
 // =========================================================================
-// 5. EXPRESS & WHATSAPP CONNECTION
+// 5. SERVER EXPRESS & WHATSAPP CONNECTION
 // =========================================================================
 const app = express();
-app.get('/', (req, res) => res.send('🤖 Bot WA Kas Cluster Acacia Online!'));
+app.get('/', (req, res) => res.send('🤖 Bot WA Kas Cluster Acacia Active!'));
 app.listen(process.env.PORT || 10000);
 
 let sock = null;
@@ -350,7 +339,6 @@ async function initAndStart() {
 
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
-            // COMMAND !konfirmasi
             if (cleanCmd === 'konfirmasi') {
                 await sock.sendMessage(remoteJid, { 
                     text: `📝 *PETUNJUK KONFIRMASI PEMBAYARAN IPL*\n\nFormat Teks:\n👉 *<No_Rumah> <Bulan> <Nominal>*\n\nContoh:\n\`CA 03-01 Juni 210000\`\n\`CA1802 Januari-Desember 2520000\`` 
@@ -358,7 +346,6 @@ async function initAndStart() {
                 return;
             }
 
-            // PATTERN CHECK FORMAT PEMBAYARAN
             const paymentPattern = /^([A-Z0-9\/\-\s]{3,12})\s+([A-Za-z\s\-]+)\s+(\d[\d\.\,]*)$/i;
             const match = msgText.match(paymentPattern);
 
@@ -380,12 +367,12 @@ async function initAndStart() {
 
                     if (result.success) {
                         const replyMsg = 
-`✅ *PEMBAYARAN SUCCESS DITERIMA!*
+`✅ *PEMBAYARAN DITERIMA!*
 
 • Rumah: *${result.normalizedHouse}*
-• Tgl Input: *${result.paymentDate}*
+• Tanggal: *${result.paymentDate}*
 • Bulan: *${result.processedMonths}* (${result.totalBulan} Bulan)
-• Total: *Rp ${nominal.toLocaleString('id-ID')}*
+• Total Masuk: *Rp ${nominal.toLocaleString('id-ID')}*
 
 _Data tanggal & nominal telah otomatis diisikan pada Sheet '2026 ALL'._ Terima kasih! 🙏`;
 
