@@ -281,13 +281,13 @@ async function checkTagihanWarga(noRumah) {
 }
 
 // -------------------------------------------------------------------------
-// FITUR BARU: DAFTAR HUTANG KHUSUS RT 3 (!hutang)
+// FITUR 2: DAFTAR HUTANG KHUSUS RT 3 (!hutang)
 // -------------------------------------------------------------------------
 async function getDaftarHutangRT3() {
     return await fetchSheetsWithRetry(async () => {
         const resTunggakan = await sheets.spreadsheets.values.get({
             spreadsheetId: SPREADSHEET_ID,
-            range: `'${TUNGGAKAN_SHEET}'!A4:J500`, // Kolom B=RT, Kolom C=No Rumah, Kolom D=Nama, Kolom J=Total Belum Bayar
+            range: `'${TUNGGAKAN_SHEET}'!A4:J500`,
         });
 
         const rows = resTunggakan.data.values || [];
@@ -297,19 +297,16 @@ async function getDaftarHutangRT3() {
             const row = rows[i];
             if (!row || row.length < 3) continue;
 
-            const rtValue = (row[1] || "").toString().trim().replace(/[^0-9]/g, ''); // Kolom B (RT)
+            const rtValue = (row[1] || "").toString().trim().replace(/[^0-9]/g, '');
             
-            // Filter Khusus RT 3 (Atau format 03 / 3)
             if (rtValue === "3" || rtValue === "03") {
                 const noRumah = (row[2] || "-").toString().trim();
                 const namaPemilik = (row[3] || "-").toString().trim();
                 
-                // Ambil Kolom J (Total Belum Bayar - Rp)
                 const rawNominalJ = row[9] || "0"; 
                 const cleanNominalStr = rawNominalJ.toString().split(',')[0].replace(/[^0-9]/g, '');
                 const totalTunggakanNominal = parseInt(cleanNominalStr, 10) || 0;
 
-                // Hanya ambil yang punya tunggakan nominal > 0
                 if (totalTunggakanNominal > 0) {
                     listTunggakan.push({
                         noRumah,
@@ -542,6 +539,44 @@ async function initAndStart() {
             const cleanCmd = msgText.toLowerCase().replace(/^[!.\s]+/, '').trim();
 
             // -----------------------------------------------------------------
+            // COMMAND !rekening
+            // -----------------------------------------------------------------
+            if (cleanCmd === 'rekening') {
+                const rekeningText = 
+`🏦 *PEMBAYARAN IPL CLUSTER ACACIA*
+
+Silakan melakukan pembayaran melalui salah satu metode berikut:
+
+*Virtual Account (VA)*
+
+*Bank Mandiri Virtual Account*
+
+Format VA:
+\`85485 + Nomor Rumah + 0\`
+
+Contoh:
+• Rumah CA1712 → \`8548517120\`
+• Rumah CA0203 → \`8548502030\`
+• Rumah CA1810 → \`8548518100\`
+
+1. Untuk pembayaran melalui channel *livin by mandiri* bisa dipilih : menu bayar - search "*Balai Pengelola Lingkungan Acacia*" atau nomor biller - klik - Bayar
+
+2. Untuk pembayaran *non Bank Mandiri* : login ke mobile banking - pilih transfer - bank tujuan Bank Mandiri - no rek diisi sesuai dengan nomor VA - isi nominal pembayaran sesuai dengan tagihan yaitu Rp210.000 - submit - pin mobile banking - selesai
+━━━━━━━━━━━━━━━━━━━━━━
+
+📌 Setelah melakukan pembayaran, mohon kirim bukti transfer dengan mengetik:
+
+*.konfirmasi*
+
+atau kirim foto bukti transfer ke bot.
+
+Terima kasih 🙏`;
+
+                await sock.sendMessage(remoteJid, { text: rekeningText }, { quoted: msg });
+                return;
+            }
+
+            // -----------------------------------------------------------------
             // COMMAND !hutang (KHUSUS RT 03)
             // -----------------------------------------------------------------
             if (cleanCmd === 'hutang') {
@@ -567,11 +602,9 @@ async function initAndStart() {
                     messageText += `━━━━━━━━━━━━━━━━━━━━━━\n`;
                     messageText += `💰 *TOTAL TUNGGAKAN RT 03: Rp ${grandTotal.toLocaleString('id-ID')}*\n\n`;
 
-                    // Kalimat sentuhan nurani / sindiran sopan
                     messageText += `*Himbauan Bersama:*\n`;
                     messageText += `_Iuran lingkungan ini adalah amanah bersama demi kenyamanan, kebersihan, dan keamanan lingkungan tempat kita tinggal sehari-hari. Sangat diharapkan kesadaran Bapak/Ibu dalam daftar di atas untuk dapat segera melunasinya. Mohon diingat, fasilitas dan fasilitas lingkungan kita nikmati bersama, alangkah bijaknya jika kewajibannya pun kita tanggung bersama tanpa membiarkan tetangga lainnya berjuang sendiri tiap bulannya._ 🙏\n\n`;
                     
-                    // Mention All di akhir
                     messageText += `@all`;
 
                     await sock.sendMessage(remoteJid, { text: messageText }, { quoted: msg });
